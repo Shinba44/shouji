@@ -254,7 +254,7 @@ fn default_true() -> bool {
 }
 
 /// 1 つのタスク = 一緒に起動するプログラムの集まり．
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Task {
     pub name: String,
     /// タスク内の全プログラム（after の添字はこの並び）．
@@ -263,7 +263,7 @@ pub struct Task {
     pub windows: Vec<TaskWindow>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TaskWindow {
     pub name: String,
     pub programs: Vec<usize>,
@@ -408,6 +408,53 @@ impl Task {
     }
 }
 
+impl Task {
+    /// 名前（ウィンドウ名かプログラム名）で起動するプログラムを絞り込む．
+    /// ウィンドウ名ならその中のプログラムすべて，プログラム名ならそれだけ．
+    /// 選ばなかったプログラムを待つ after は取り除く（待ち続けないように）．
+    pub fn select(&mut self, names: &[String]) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let mut selected = vec![false; self.programs.len()];
+        for name in names {
+            let window = self.windows.iter().find(|w| w.name == *name);
+            let program = self.programs.iter().position(|p| p.name == *name);
+            match (window, program) {
+                (Some(w), None) => w.programs.iter().for_each(|&k| selected[k] = true),
+                (None, Some(k)) => selected[k] = true,
+                (Some(_), Some(_)) => bail!("{name} はウィンドウ名とプログラム名の両方にあるため区別できません"),
+                (None, None) => {
+                    let windows: Vec<&str> = self.windows.iter().map(|w| w.name.as_str()).collect();
+                    let programs: Vec<&str> = self.programs.iter().map(|p| p.name.as_str()).collect();
+                    bail!(
+                        "{name} というウィンドウもプログラムもありません（ウィンドウ: {} / プログラム: {}）",
+                        windows.join(", "),
+                        programs.join(", ")
+                    );
+                }
+            }
+        }
+        self.select_mask(&selected);
+        Ok(())
+    }
+
+    /// プログラムごとに選ぶか（`selected[k]`）で絞り込む．
+    /// 選ばなかったプログラムを待つ after は取り除く（待ち続けないように）．
+    pub fn select_mask(&mut self, selected: &[bool]) {
+        let selected = |k: usize| selected.get(k).copied().unwrap_or(false);
+        for w in &mut self.windows {
+            w.programs.retain(|&k| selected(k));
+        }
+        self.windows.retain(|w| !w.programs.is_empty());
+        for (k, p) in self.programs.iter_mut().enumerate() {
+            if selected(k) {
+                p.after.retain(|&(dep, _)| selected(dep));
+            }
+        }
+    }
+}
+
 /// after が循環していないか（a → b → a など）を調べる．
 fn check_cycle(programs: &[Program]) -> Result<()> {
     // 0: 未訪問，1: 探索中，2: 済み
@@ -524,6 +571,36 @@ mod tests {
         // programs だけのタスクでも，タスク全体の env が効く
         let t = task("env: {A: task}\nprograms:\n  - name: p\n    command: x\n    env: {B: prog}\n").unwrap();
         assert_eq!(t.programs[0].env.len(), 2);
+    }
+
+    #[test]
+    fn select_by_name() {
+        let yaml = "windows:\n  - name: app\n    programs:\n      - name: build\n        command: make\n      - name: server\n        command: ./srv\n        after: [{build: done}]\n  - name: tools\n    programs:\n      - name: log\n        command: git log\n";
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let shape = |t: &Task| t.windows.iter().map(|w| format!("{}:{:?}", w.name, w.programs)).collect::<Vec<_>>();
+
+        // ウィンドウ名ならその中すべて
+        let mut t = task(yaml).unwrap();
+        t.select(&names(&["app"])).unwrap();
+        assert_eq!(shape(&t), ["app:[0, 1]"]);
+        assert_eq!(t.programs[1].after, vec![(0, Cond::Done)]);
+
+        // プログラム名ならそれだけ．選ばなかった build を待つ after は外れる
+        let mut t = task(yaml).unwrap();
+        t.select(&names(&["server", "log"])).unwrap();
+        assert_eq!(shape(&t), ["app:[1]", "tools:[2]"]);
+        assert!(t.programs[1].after.is_empty() && !t.programs[1].waits());
+
+        // 名前なしなら全部
+        let mut t = task(yaml).unwrap();
+        t.select(&[]).unwrap();
+        assert_eq!(shape(&t), ["app:[0, 1]", "tools:[2]"]);
+
+        let mut t = task(yaml).unwrap();
+        let e = format!("{:#}", t.select(&names(&["nope"])).unwrap_err());
+        assert!(e.contains("nope というウィンドウもプログラムもありません") && e.contains("ウィンドウ: app, tools"));
+        let mut t = task("windows:\n  - name: x\n    programs:\n      - name: x\n        command: y\n").unwrap();
+        assert!(format!("{:#}", t.select(&names(&["x"])).unwrap_err()).contains("区別できません"));
     }
 
     #[test]

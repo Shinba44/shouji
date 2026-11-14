@@ -24,7 +24,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use config::{Config, Restart, Task, TaskEntry};
 use deps::{Dep, DepStatus, RunState, Wait};
 use input::{Action, Direction, InputParser};
-use launcher::{Launcher, MenuResult};
+use launcher::{Launcher, MenuResult, Selection};
 use layout::{Dir, Node, PaneId, Rect, Separator};
 use mouse::{Button, Kind as MouseKind, MouseEvent};
 use pane::Pane;
@@ -235,8 +235,9 @@ struct App {
 }
 
 impl App {
-    /// `startup` はコマンドラインの `-t` で指定されたタスクの添字．起動後はその最後のウィンドウを表示する．
-    fn new(tx: Sender<Event>, config: Config, startup: &[usize]) -> Result<Self> {
+    /// `startup` はコマンドラインの `-t` で指定されたタスクの添字と，起動するものの名前（空なら全部）．
+    /// 起動後はその最後のウィンドウを表示する．
+    fn new(tx: Sender<Event>, config: Config, startup: &[(usize, Vec<String>)]) -> Result<Self> {
         let size = terminal::size()?;
         // マウス操作は常にオンで起動する（C-q m で切り替えられる）
         let mouse = true;
@@ -262,8 +263,8 @@ impl App {
             quit: false,
         };
         // -t で指定されたタスクを開く（表示は最後に開いたもの）
-        for &i in startup {
-            app.launch_task(i);
+        for (i, names) in startup {
+            app.launch_task_only(*i, names);
         }
         if app.windows.is_empty() {
             // タスクが 1 つも開かなかったときだけ，シェルのウィンドウを開く
@@ -302,14 +303,18 @@ impl App {
 
     /// shouji.yaml の `i` 番目のタスクを読み込んで起動する．失敗はステータスバーに出す．
     fn launch_task(&mut self, i: usize) {
+        self.launch_task_only(i, &[]);
+    }
+
+    /// タスクのうち `names`（ウィンドウ名かプログラム名）で選んだものだけを起動する．空なら全部．
+    fn launch_task_only(&mut self, i: usize, names: &[String]) {
         let Some(entry) = self.config.tasks.get(i).cloned() else { return };
-        if let Err(e) = entry.load().and_then(|task| self.open_task(task)) {
-            // 原因（ファイルが無い・不明な項目など）を先に出し，どのファイルかを後ろに付ける
-            let msg = match e.chain().count() {
-                1 => format!("{e}"),
-                _ => format!("{} [{e}]", e.root_cause()),
-            };
-            self.message = Some(msg.replace('\n', " "));
+        let result = entry.load().and_then(|mut task| {
+            task.select(names)?;
+            self.open_task(task)
+        });
+        if let Err(e) = result {
+            self.report(e);
         }
     }
 
@@ -427,7 +432,39 @@ impl App {
                 self.launcher = None;
                 self.launch_task(i);
             }
+            MenuResult::OpenSelect(i) => {
+                // 選択画面はタスクファイルを読んでから開く
+                let Some(entry) = self.config.tasks.get(i).cloned() else { return };
+                match entry.load() {
+                    Ok(task) => {
+                        if let Some(l) = self.launcher.as_mut() {
+                            l.select = Some(Selection::new(task));
+                        }
+                    }
+                    Err(e) => {
+                        self.launcher = None;
+                        self.report(e);
+                    }
+                }
+            }
+            MenuResult::LaunchTask(task) => {
+                self.launcher = None;
+                if let Err(e) = self.open_task(task) {
+                    self.report(e);
+                }
+            }
+            MenuResult::NothingSelected => self.message = Some("起動するものを選んでください（Space でチェック）".into()),
         }
+    }
+
+    /// エラーをステータスバーに出す．原因（ファイルが無い・不明な項目など）を先に，
+    /// どのファイルかを後ろに付ける．
+    fn report(&mut self, e: anyhow::Error) {
+        let msg = match e.chain().count() {
+            1 => format!("{e}"),
+            _ => format!("{} [{e}]", e.root_cause()),
+        };
+        self.message = Some(msg.replace('\n', " "));
     }
 
     // ---- マウス ----
@@ -1132,21 +1169,30 @@ fn main() -> Result<()> {
     }
 
     // 設定は raw モードに入る前に読む（エラーを普通に表示するため）
-    const USAGE: &str = "usage: shouji [-c CONFIG.yaml] [-t TASK.yaml]...\n\
-        \n  -c, --config FILE  設定ファイル（省略時は ./shouji.yaml → ~/.config/shouji/config.yaml）\
-        \n  -t, --task FILE    起動時に開くタスクファイル（複数指定可）";
+    const USAGE: &str = "usage: shouji [-c CONFIG.yaml] [-t TASK.yaml [NAME...]]...\n\
+        \n  -c, --config FILE     設定ファイル（省略時は ./shouji.yaml → ~/.config/shouji/config.yaml）\
+        \n  -t, --task FILE       起動時に開くタスクファイル（複数指定可）\
+        \n                        続けて NAME（ウィンドウ名かプログラム名）を書くと，それだけを起動する\
+        \n                        例: shouji -t task.yaml app        app ウィンドウのプログラムすべて\
+        \n                            shouji -t task.yaml build server  build と server だけ";
     let mut config_path = None;
-    let mut task_paths = Vec::new();
+    // (タスクファイル, 起動するものの名前)
+    let mut task_args: Vec<(String, Vec<String>)> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-c" | "--config" => config_path = Some(std::path::PathBuf::from(args.next().context(USAGE)?)),
-            "-t" | "--task" => task_paths.push(args.next().context(USAGE)?),
+            "-t" | "--task" => task_args.push((args.next().context(USAGE)?, Vec::new())),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
             }
-            _ => bail!("不明な引数: {arg}\n{USAGE}"),
+            _ if arg.starts_with('-') => bail!("不明な引数: {arg}\n{USAGE}"),
+            // -t FILE に続く名前
+            _ => match task_args.last_mut() {
+                Some((_, names)) => names.push(arg),
+                None => bail!("{arg}: 名前は -t TASK.yaml の後ろに書いてください\n{USAGE}"),
+            },
         }
     }
     let mut config = Config::load(config_path.as_deref())?;
@@ -1155,10 +1201,11 @@ fn main() -> Result<()> {
     // メニューから開き直せるよう，タスク一覧にも加える．
     let cwd = std::env::current_dir()?;
     let mut startup = Vec::new();
-    for path in &task_paths {
-        let entry = TaskEntry::new(path, None, &cwd);
-        entry.load()?;
-        startup.push(config.add_task(entry));
+    for (path, names) in task_args {
+        let entry = TaskEntry::new(&path, None, &cwd);
+        // 名前の間違いもここで報告する
+        entry.load()?.select(&names).with_context(|| format!("{path} で起動するものを選べません"))?;
+        startup.push((config.add_task(entry), names));
     }
 
     let (tx, rx) = mpsc::channel();

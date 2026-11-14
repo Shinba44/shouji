@@ -11,6 +11,15 @@ cargo run -- -c sample_config/shouji.yaml # use a specific config (pick a task w
 cargo run                                 # looks for ./shouji.yaml, then ~/.config/shouji/config.yaml
 ```
 
+To start only part of a task, list window or program names after the task file:
+
+```sh
+cargo run -- -t sample_config/task.yaml app           # every program in the "app" window
+cargo run -- -t sample_config/task.yaml build server  # only "build" and "server"
+```
+
+`after` dependencies on programs that were not selected are ignored.
+
 ## Configuration
 
 `shouji.yaml`: the tasks listed in the launcher
@@ -48,7 +57,7 @@ Every option is described in `sample_config/task.yaml`.
 
 | Key | Action |
 |---|---|
-| `C-q Space` | Open the task launcher |
+| `C-q Space` | Open the task launcher (`Enter` starts everything, `→` picks windows/programs to start) |
 | `C-q %` / `C-q "` | Split left/right, top/bottom |
 | `C-q o`, `C-q h/j/k/l`, `C-q arrows` | Move between panes |
 | `C-q c` / `C-q n` / `C-q p` / `C-q 0-9` | New window / switch windows |
