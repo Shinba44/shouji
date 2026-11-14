@@ -1,0 +1,17 @@
+# shouji の設定ファイル．C-q Space のメニューに並べるタスクファイルを書く．
+# 相対パスは，この shouji.yaml のあるディレクトリから探す．
+#
+# 書き方:
+#   - task.yaml                  # パスだけ（名前はファイル名から．この例なら "task"）
+#   - path: ~/work/api/task.yaml # 細かく指定する場合
+#     name: api                  #   メニューに出す名前（省略可）
+#
+# 起動時にタスクを開きたいときは，shouji -t task.yaml のように指定する．
+#
+# mouse: マウス操作（ボタン・クリック・ホイール）を使うか（省略時 true）．
+#        有効な間は，文字の選択は Shift+ドラッグで行う．C-q m でその場で切り替えられる．
+
+mouse: true
+
+tasks:
+  - task.yaml
