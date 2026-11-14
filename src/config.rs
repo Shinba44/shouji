@@ -4,7 +4,6 @@
 //! ディレクトリから解決する．
 //!
 //! ```yaml
-//! mouse: true                   # マウス操作を使う（省略時 true）
 //! tasks:
 //!   - task.yaml                 # パスだけでもよい（名前はファイル名から）
 //!   - path: ~/work/api/task.yaml
@@ -64,8 +63,6 @@ fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 struct RawConfig {
     #[serde(default)]
     tasks: Vec<RawTaskEntry>,
-    #[serde(default = "default_true")]
-    mouse: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,17 +82,9 @@ struct RawTaskFull {
     name: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Config {
     pub tasks: Vec<TaskEntry>,
-    /// マウス操作（クリック・ホイール）を使うか．省略時は true．
-    pub mouse: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self { tasks: Vec::new(), mouse: true }
-    }
 }
 
 /// shouji.yaml に書かれたタスクファイルへの参照．
@@ -119,7 +108,7 @@ impl Config {
                 TaskEntry::new(&path, name, base)
             })
             .collect();
-        Self { tasks, mouse: raw.mouse }
+        Self { tasks }
     }
 
     /// タスクを一覧に加え，その添字を返す．同じファイルがすでにあればその添字を返す．

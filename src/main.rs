@@ -238,7 +238,8 @@ impl App {
     /// `startup` はコマンドラインの `-t` で指定されたタスクの添字．起動後はその最後のウィンドウを表示する．
     fn new(tx: Sender<Event>, config: Config, startup: &[usize]) -> Result<Self> {
         let size = terminal::size()?;
-        let mouse = config.mouse;
+        // マウス操作は常にオンで起動する（C-q m で切り替えられる）
+        let mouse = true;
         let mut app = Self {
             panes: HashMap::new(),
             windows: Vec::new(),
