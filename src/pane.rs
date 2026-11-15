@@ -152,14 +152,20 @@ impl Pane {
         let program = self.program.as_ref();
         let typeahead = program.filter(|p| !shell && !p.autostart).map(|p| p.command.trim_end().to_string());
 
-        let mut cmd = match program {
-            Some(p) if !shell && typeahead.is_none() => {
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-                let mut cmd = CommandBuilder::new(shell);
-                cmd.args(["-c", &p.command]);
+        let login_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let script = match program {
+            Some(p) if !shell && typeahead.is_none() => Some(program_script(p.pre_command.as_deref(), &p.command)),
+            // シェルを開くときも pre_command を実行してから，その環境でシェルに入れ替える
+            Some(Program { pre_command: Some(pre), .. }) => Some(shell_script(pre, &login_shell)),
+            _ => None,
+        };
+        let mut cmd = match script {
+            Some(script) => {
+                let mut cmd = CommandBuilder::new(&login_shell);
+                cmd.args(["-c", &script]);
                 cmd
             }
-            _ => CommandBuilder::new_default_prog(),
+            None => CommandBuilder::new_default_prog(),
         };
         cmd.env("TERM", "xterm-256color");
         cmd.env("SHOUJI", "1");
@@ -360,5 +366,53 @@ impl Pane {
         if let Some(proc) = &mut self.proc {
             let _ = proc.child.try_wait();
         }
+    }
+}
+
+/// プログラムとして実行するスクリプト．pre_command が失敗したら command は実行しない．
+/// pre_command は複数行やコメントでもよいように `{ }` で囲む（終了コードは最後のコマンドのもの）．
+fn program_script(pre: Option<&str>, command: &str) -> String {
+    match pre {
+        Some(pre) => format!("{{\n{pre}\n}} && {{\n{command}\n}}"),
+        None => command.to_string(),
+    }
+}
+
+/// pre_command を実行してから，その環境のままシェルに入れ替えるスクリプト．
+/// pre_command が失敗しても，原因を調べられるようにシェルは開く．
+fn shell_script(pre: &str, shell: &str) -> String {
+    let quoted = format!("'{}'", shell.replace('\'', r"'\''"));
+    format!("{{\n{pre}\n}}\nexec {quoted}")
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn run(script: &str) -> (bool, String) {
+        let out = Command::new("sh").args(["-c", script]).output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    #[test]
+    fn pre_command_runs_in_same_shell() {
+        assert_eq!(program_script(None, "echo hi"), "echo hi");
+        // pre_command の変数が command から見える．コメントで終わっても壊れない
+        let (ok, out) = run(&program_script(Some("X=from-pre # comment"), "echo $X"));
+        assert!(ok);
+        assert_eq!(out, "from-pre\n");
+        // pre_command が失敗したら command は実行せず，失敗で終わる
+        let (ok, out) = run(&program_script(Some("false"), "echo ran"));
+        assert!(!ok);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn shell_script_execs_shell() {
+        let (ok, out) = run(&shell_script("X=1", "/bin/echo"));
+        assert!(ok);
+        assert_eq!(out, "\n");
+        assert!(shell_script("x", "/it's/sh").ends_with(r"exec '/it'\''s/sh'"));
     }
 }

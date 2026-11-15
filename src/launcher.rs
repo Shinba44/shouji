@@ -469,6 +469,7 @@ mod tests {
         Program {
             name: name.into(),
             command: format!("run {name}"),
+            pre_command: None,
             cwd: None,
             env: BTreeMap::new(),
             keep_on_exit: true,

@@ -1,0 +1,89 @@
+# ROS (Noetic) の起動例．turtlesim を動かす．
+#   cargo run -- -t sample_config/ros.yaml          # 全部起動
+#   cargo run -- -t sample_config/ros.yaml core sim # roscore と turtlesim だけ
+#   cargo run -- -t sample_config/ros.yaml core launch # roscore と roslaunch の例だけ
+#
+# 書き方の詳細は task.yaml を参照．
+#
+# ポイント:
+#   - setup.bash はタスクの pre_command で読み込む．各プログラムの command の前に同じシェルで
+#     実行されるので，ROS の環境変数（PATH や ROS_PACKAGE_PATH など）が command にも効く．
+#     autostart: false のシェルや，終了後の s で開くシェルにも効く．
+#     ワークスペースも使うなら  pre_command: . /opt/ros/noetic/setup.bash && . ~/catkin_ws/devel/setup.bash
+#   - roscore は「起動した」だけでは master が使えるとは限らないので，
+#     master-ready で rosnode list が通るまで待ち，その終了（done）を他のノードが待つ．
+#   - キー入力が必要な teleop や，GUI の rqt_graph，ファイルを作る rosbag は
+#     autostart: false にして，必要なときに Enter で起動する．
+
+name: ros-turtlesim
+pre_command: . /opt/ros/noetic/setup.bash
+env:
+  ROS_MASTER_URI: http://localhost:11311
+
+windows:
+  - name: core
+    programs:
+      - name: roscore
+        command: roscore
+        restart: { when: on-failure, delay: 2, max: 3 }   # すでに別の roscore があると失敗し続けるので回数を制限
+        log: logs/roscore.log
+
+      - name: master-ready
+        command: until rosnode list >/dev/null 2>&1; do sleep 0.5; done && echo "[master-ready] ok"
+        after:
+          - roscore: started
+
+  - name: sim
+    programs:
+      - name: turtlesim
+        command: rosrun turtlesim turtlesim_node
+        after:
+          - master-ready: done
+
+      - name: teleop
+        command: rosrun turtlesim turtle_teleop_key
+        autostart: false     # このペインを選んで Enter，矢印キーで亀を動かす
+        after:
+          - turtlesim: started
+
+  # roslaunch の例．launch/mimic.launch で turtlesim を 2 つと mimic を起動し，
+  # draw-square で turtlesim1 の亀を動かすと，turtlesim2 の亀が同じ動きをする．
+  - name: launch
+    programs:
+      - name: mimic
+        cwd: .               # launch/mimic.launch をこのファイルのディレクトリから探す
+        command: roslaunch launch/mimic.launch
+        # パッケージ内の launch ファイルなら: roslaunch turtle_tf turtle_tf_demo.launch
+        # roslaunch は master がなければ自分で roscore を立てるが，
+        # ここでは core の roscore を使うので master-ready を待つ．
+        after:
+          - master-ready: done
+
+      - name: draw-square
+        command: rosrun turtlesim draw_square __ns:=/turtlesim1
+        after:
+          - mimic: started
+        delay: 3             # roslaunch がノードを立ち上げ終わるのを待つ
+
+  - name: monitor
+    env:
+      ROSCONSOLE_FORMAT: '[${severity}] [${node}] ${message}'
+    programs:
+      - name: pose
+        command: rostopic echo /turtle1/pose
+        after:
+          - turtlesim: started
+        delay: 2
+
+      - name: nodes
+        command: watch -n 2 rosnode list
+        after:
+          - master-ready: done
+
+      - name: rqt-graph
+        command: rqt_graph
+        autostart: false
+
+      - name: rosbag
+        command: mkdir -p logs && rosbag record -o logs/turtle /turtle1/cmd_vel /turtle1/pose
+        autostart: false     # Ctrl-c で記録を止める

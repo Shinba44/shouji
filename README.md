@@ -43,7 +43,7 @@ windows:
         command: cargo run
         after: [{ build: done }]     # wait until build exits successfully (or: started)
         restart: on-failure          # or { when, delay, max }
-        log: logs/server.log
+        log: logs/server.log         # relative to cwd (or where shouji was started)
   - name: tools
     programs:
       - name: git-log
@@ -51,7 +51,18 @@ windows:
         autostart: false             # type the command into a shell and wait for Enter
 ```
 
-Every option is described in `sample_config/task.yaml`.
+`pre_command` runs in the same shell before `command` (and before the shell opened by `autostart: false` or `s`).
+Like `env`, it can be set on the task, a window or a program; the narrowest one wins.
+
+```yaml
+name: ros
+pre_command: . /opt/ros/noetic/setup.bash
+programs:
+  - name: roscore
+    command: roscore
+```
+
+Every option is described in `sample_config/task.yaml`. `sample_config/ros.yaml` is a ROS example.
 
 ## Keys (prefix: `Ctrl-q`)
 

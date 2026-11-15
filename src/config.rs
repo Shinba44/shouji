@@ -21,6 +21,7 @@
 //!     cwd: ./server             # 相対パスはタスクファイルのディレクトリから
 //!     env:
 //!       RUST_LOG: debug
+//!     pre_command: . ./env.sh   # command の前に同じシェルで実行（タスク・ウィンドウにも書ける）
 //!     keep_on_exit: true        # 終了してもペインを残す（省略時 true）
 //!     autostart: true           # false ならシェルにコマンドを入力した状態で待つ（Enter で実行）
 //!   - name: client
@@ -155,6 +156,8 @@ struct RawTask {
     /// タスク内のすべてのプログラムに付ける環境変数．
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// タスク内のすべてのプログラムの command の前に実行するコマンド．
+    pre_command: Option<String>,
     /// 1 つのウィンドウに並べる場合．
     programs: Option<Vec<RawProgram>>,
     /// ウィンドウに分ける場合．
@@ -168,6 +171,8 @@ struct RawWindow {
     /// このウィンドウのプログラムに付ける環境変数．
     #[serde(default)]
     env: BTreeMap<String, String>,
+    /// このウィンドウのプログラムの command の前に実行するコマンド．
+    pre_command: Option<String>,
     programs: Vec<RawProgram>,
 }
 
@@ -176,6 +181,7 @@ struct RawWindow {
 struct RawProgram {
     name: String,
     command: String,
+    pre_command: Option<String>,
     cwd: Option<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
@@ -274,6 +280,9 @@ pub struct Program {
     pub name: String,
     /// `$SHELL -c` で実行するコマンド．
     pub command: String,
+    /// command の前に同じシェルで実行するコマンド（`source setup.bash` など）．
+    /// 失敗したら command は実行しない．シェルを開くとき（autostart: false や s）にも実行する．
+    pub pre_command: Option<String>,
     /// 作業ディレクトリ．省略時は shouji を起動したディレクトリ．
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
@@ -291,7 +300,8 @@ pub struct Program {
     pub restart_delay: Duration,
     /// 自動で再起動する回数の上限（`None` は無制限）．
     pub max_restarts: Option<u32>,
-    /// 出力を追記するログファイル．
+    /// 出力を追記するログファイル．相対パスは作業ディレクトリ（cwd，なければ shouji を起動した
+    /// ディレクトリ）から解決する．
     pub log: Option<PathBuf>,
 }
 
@@ -325,7 +335,7 @@ impl Task {
         let task_name = raw.name.unwrap_or_else(|| default_name.into());
         // programs だけならタスク名のウィンドウ 1 つにまとめる
         let raw_windows = match (raw.programs, raw.windows) {
-            (Some(programs), None) => vec![RawWindow { name: task_name.clone(), env: BTreeMap::new(), programs }],
+            (Some(programs), None) => vec![RawWindow { name: task_name.clone(), env: BTreeMap::new(), pre_command: None, programs }],
             (None, Some(windows)) => windows,
             (Some(_), Some(_)) => bail!("programs と windows はどちらか一方だけ書いてください"),
             (None, None) => bail!("programs か windows を書いてください"),
@@ -343,6 +353,8 @@ impl Task {
                 env.extend(w.env.clone());
                 env.extend(std::mem::take(&mut p.env));
                 p.env = env;
+                // pre_command は狭い領域のものが丸ごと優先される（空文字列なら付けない）
+                p.pre_command = p.pre_command.take().or_else(|| w.pre_command.clone()).or_else(|| raw.pre_command.clone());
                 p
             }));
             windows.push(TaskWindow { name: w.name, programs: (start..all.len()).collect() });
@@ -388,10 +400,14 @@ impl Task {
                 Some(RawRestart::Full(f)) => (f.when, f.delay, f.max),
             };
             let restart_delay = secs("restart.delay", restart_delay, 1.0)?;
+            // log の相対パスは command と同じく作業ディレクトリから
+            let cwd = p.cwd.as_ref().map(|c| resolve(c, base));
+            let log_base = cwd.clone().or_else(|| std::env::current_dir().ok()).unwrap_or_default();
             programs.push(Program {
                 name: p.name.clone(),
                 command: p.command.clone(),
-                cwd: p.cwd.as_ref().map(|c| resolve(c, base)),
+                pre_command: p.pre_command.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+                cwd,
                 env: p.env.clone(),
                 keep_on_exit: p.keep_on_exit,
                 autostart: p.autostart,
@@ -400,7 +416,7 @@ impl Task {
                 restart,
                 restart_delay,
                 max_restarts,
-                log: p.log.as_ref().map(|l| resolve(l, base)),
+                log: p.log.as_ref().map(|l| resolve(l, &log_base)),
             });
         }
         check_cycle(&programs)?;
@@ -535,7 +551,7 @@ mod tests {
     #[test]
     fn parse_restart_and_log() {
         let t = task(
-            "programs:\n  - name: a\n    command: x\n  - name: b\n    command: y\n    restart:\n      when: on-failure\n      delay: 0.5\n      max: 3\n    log: logs/b.log\n  - name: c\n    command: z\n    restart: always\n",
+            "programs:\n  - name: a\n    command: x\n  - name: b\n    command: y\n    restart:\n      when: on-failure\n      delay: 0.5\n      max: 3\n    log: logs/b.log\n  - name: c\n    command: z\n    restart: always\n    cwd: ./srv\n    log: c.log\n  - name: d\n    command: w\n    log: /var/log/d.log\n",
         )
         .unwrap();
         let (a, b) = (&t.programs[0], &t.programs[1]);
@@ -543,7 +559,10 @@ mod tests {
         assert_eq!(b.restart, Restart::OnFailure);
         assert_eq!(b.restart_delay, Duration::from_millis(500));
         assert_eq!(b.max_restarts, Some(3));
-        assert_eq!(b.log, Some(PathBuf::from("/proj/logs/b.log")));
+        // log の相対パスは cwd から．cwd がなければ shouji を起動したディレクトリから
+        assert_eq!(b.log, Some(std::env::current_dir().unwrap().join("logs/b.log")));
+        assert_eq!(t.programs[2].log, Some(PathBuf::from("/proj/./srv/c.log")));
+        assert_eq!(t.programs[3].log, Some(PathBuf::from("/var/log/d.log")));
         // 1 行の書き方では delay と max は省略時の値
         let c = &t.programs[2];
         assert_eq!((c.restart, c.restart_delay, c.max_restarts), (Restart::Always, Duration::from_secs(1), None));
@@ -571,6 +590,20 @@ mod tests {
         // programs だけのタスクでも，タスク全体の env が効く
         let t = task("env: {A: task}\nprograms:\n  - name: p\n    command: x\n    env: {B: prog}\n").unwrap();
         assert_eq!(t.programs[0].env.len(), 2);
+    }
+
+    #[test]
+    fn pre_command_layers() {
+        let t = task(
+            "pre_command: . task.sh\nwindows:\n  - name: w1\n    pre_command: . win.sh\n    programs:\n      - name: p1\n        command: x\n        pre_command: '  . prog.sh\n'\n      - name: p2\n        command: y\n      - name: p3\n        command: y\n        pre_command: ''\n  - name: w2\n    programs:\n      - name: p4\n        command: z\n",
+        )
+        .unwrap();
+        let pre = |i: usize| t.programs[i].pre_command.as_deref();
+        // 狭い領域のものが丸ごと優先される．空文字列なら付けない
+        assert_eq!(pre(0), Some(". prog.sh"));
+        assert_eq!(pre(1), Some(". win.sh"));
+        assert_eq!(pre(2), None);
+        assert_eq!(pre(3), Some(". task.sh"));
     }
 
     #[test]
