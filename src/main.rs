@@ -1195,6 +1195,10 @@ fn main() -> Result<()> {
             println!("{USAGE}");
             Ok(())
         }
+        Some("-V" | "--version") => {
+            println!("shouji {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("--server") => {
             // shouji --server NAME WIDTHxHEIGHT [オプション...]（クライアントが起動する）
             let name = rest.first().context("--server needs a name")?.clone();

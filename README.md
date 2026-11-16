@@ -3,6 +3,25 @@
 A terminal launcher: list your programs in a YAML file and start them all at once, each in its own pane.
 It also works as a simple terminal multiplexer (splits, windows, scrollback).
 
+## Install
+
+Linux (x86_64 / aarch64), from GitHub Releases:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arata/shouji/master/install.sh | sh
+```
+
+It installs to `/usr/local/bin` (using `sudo` if needed). Options:
+
+```sh
+curl -fsSL .../install.sh | SHOUJI_VERSION=v0.1.0 sh                # a specific version
+curl -fsSL .../install.sh | SHOUJI_INSTALL_DIR="$HOME/.local/bin" sh  # another place, no sudo
+```
+
+Or build it yourself: `cargo install --path .`
+
+To make a release, push a tag: `git tag v0.1.0 && git push origin v0.1.0`.
+
 ## Usage
 
 ```sh
