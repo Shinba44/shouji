@@ -25,8 +25,7 @@ pub enum Dir {
     Vertical,
 }
 
-/// ペイン間の区切り線（今は枠どうしのすき間になるだけで，位置はテストでしか見ない）．
-#[allow(dead_code)]
+/// ペイン間の区切り線．
 #[derive(Clone, Copy, Debug)]
 pub struct Separator {
     pub x: u16,

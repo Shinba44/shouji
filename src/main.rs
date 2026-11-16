@@ -131,8 +131,17 @@ impl Window {
             if self.zoom && self.contains(self.active) {
                 full.push((self.active, area));
             } else {
-                // 区切り線の 1 セルは枠どうしのすき間になる
-                root.layout(area, &mut full, &mut Vec::new());
+                // 左右の区切り線の 1 列は枠どうしのすき間にする．
+                // 上下の区切り線の 1 行は上のペインに足し，枠どうしをくっつける
+                let mut seps = Vec::new();
+                root.layout(area, &mut full, &mut seps);
+                for sep in seps.iter().filter(|s| s.dir == Dir::Vertical) {
+                    for (_, r) in full.iter_mut() {
+                        if r.y + r.h == sep.y && r.x >= sep.x && r.x + r.w <= sep.x + sep.len {
+                            r.h += 1;
+                        }
+                    }
+                }
             }
         }
         // 各ペインを枠で囲み，上辺をタイトルにする（小さすぎれば枠なしでタイトル行だけ）
