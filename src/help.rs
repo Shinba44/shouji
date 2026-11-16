@@ -1,70 +1,81 @@
-//! ヘルプ画面（C-q ? かステータスバーの ? Help で開く）．キー操作とマウス操作の一覧．
+//! ヘルプ画面（? か C-q ? で開く）．操作モード・入力モードの説明と，キー操作の一覧．
 
-use crossterm::style::Color;
 use unicode_width::UnicodeWidthStr;
 
 use crate::launcher::put_clipped;
 use crate::render::{Frame, Style};
+use crate::ui::theme::*;
 
-enum Line {
-    Text(&'static str),
-    Section(&'static str),
-    Key(&'static str, &'static str),
-    Blank,
+struct Group {
+    title: &'static str,
+    items: &'static [(&'static str, &'static str)],
 }
 
-use Line::*;
-
-const LINES: &[Line] = &[
-    Text("All shortcuts start with Ctrl-q (written C-q):"),
-    Text("press Ctrl-q, let go, then press the key."),
-    Blank,
-    Section("Start programs"),
-    Key("C-q Space", "Open the task launcher"),
-    Key("", "Enter: start everything   ->: choose what to start"),
-    Blank,
-    Section("Panes"),
-    Key("C-q %", "Split left / right"),
-    Key("C-q \"", "Split top / bottom"),
-    Key("C-q o", "Move to the next pane"),
-    Key("C-q arrows, h/j/k/l", "Move to the pane on that side"),
-    Key("C-q x", "Close the pane"),
-    Blank,
-    Section("Windows"),
-    Key("C-q c", "New window"),
-    Key("C-q n / C-q p", "Next / previous window"),
-    Key("C-q 0-9", "Go to window number N"),
-    Blank,
-    Section("Reading past output (scroll mode)"),
-    Key("C-q [", "Start scrolling (or use the mouse wheel)"),
-    Key("k / j, arrows", "One line up / down"),
-    Key("u / d, PgUp / PgDn", "Half / full page up / down"),
-    Key("g / G", "Oldest / newest output"),
-    Key("q, Esc", "Stop scrolling"),
-    Blank,
-    Section("When a program has stopped (keys in its pane)"),
-    Key("r", "Run it again"),
-    Key("s", "Open a shell in its directory"),
-    Key("q", "Close the pane"),
-    Blank,
-    Section("When a program is waiting to start"),
-    Key("Enter", "Start it now"),
-    Key("q", "Close the pane"),
-    Blank,
-    Section("Mouse"),
-    Key("Click", "Select a pane, press a button"),
-    Key("Wheel", "Scroll through past output"),
-    Key("Shift + drag", "Select text to copy"),
-    Key("C-q m", "Turn the mouse on / off"),
-    Blank,
-    Section("Other"),
-    Key("C-q d", "Quit shouji"),
-    Key("C-q C-q", "Send Ctrl-q to the program"),
-    Key("C-q ?", "Show this help"),
+const GROUPS: &[Group] = &[
+    Group {
+        title: "Panes",
+        items: &[
+            ("Click", "Select a pane"),
+            ("C-q o, C-q Tab", "Next pane"),
+            ("C-q arrows", "Pane on that side (hjkl too)"),
+            ("C-q z", "Zoom in / back to normal"),
+            ("C-q % / C-q \"", "Split left-right / top-bottom"),
+            ("C-q x", "Close the pane"),
+        ],
+    },
+    Group {
+        title: "Windows",
+        items: &[
+            ("Click a tab", "Switch window"),
+            ("C-q 1-9", "Go to window number N"),
+            ("C-q n / C-q p", "Next / previous window"),
+            ("C-q c", "New window"),
+        ],
+    },
+    Group {
+        title: "Stopped or waiting programs",
+        items: &[
+            ("r", "Run a stopped program again"),
+            ("s", "Open a shell in its directory"),
+            ("x", "Close the pane"),
+            ("Enter", "Start a waiting program now"),
+        ],
+    },
+    Group {
+        title: "Reading past output",
+        items: &[
+            ("Wheel, C-q [", "Start scrolling"),
+            ("k / j", "One line up / down"),
+            ("u / d", "Half page up / down"),
+            ("g / G", "Oldest / newest output"),
+            ("q, Esc", "Stop scrolling"),
+        ],
+    },
+    Group {
+        title: "Programs",
+        items: &[("C-q Space", "Task launcher: start programs"), ("Click Tasks", "The same, with the mouse")],
+    },
+    Group {
+        title: "Other",
+        items: &[
+            ("C-q t", "Show / hide the layout panel"),
+            ("C-q m", "Mouse on / off"),
+            ("C-q ?", "This help"),
+            ("C-q d", "Quit (asks first)"),
+            ("C-q C-q", "Send Ctrl-q to the program"),
+        ],
+    },
 ];
 
-const KEY_WIDTH: usize = 22;
-const TITLE: &str = " Help ";
+const INTRO: [&str; 2] = [
+    "Everything you type goes to the selected pane. Most things can be done by clicking.",
+    "Keyboard commands start with Ctrl-q (C-q): press Ctrl-q, let go, then press the key.",
+];
+
+const KEY_W: usize = 18;
+
+/// 1 行に並べる部品（左端からの列, 文字, 色）．
+type Line = Vec<(u16, String, Style)>;
 
 /// ヘルプ画面．`offset` は表示している先頭の行．
 #[derive(Default)]
@@ -81,7 +92,7 @@ struct Geometry {
 
 impl Geometry {
     fn visible(&self) -> usize {
-        self.h.saturating_sub(2) as usize
+        self.h.saturating_sub(4) as usize
     }
 
     fn contains(&self, x: u16, y: u16) -> bool {
@@ -89,12 +100,62 @@ impl Geometry {
     }
 }
 
-fn line_width(l: &Line) -> usize {
-    match l {
-        Text(t) | Section(t) => t.width() + 1,
-        Key(_, d) => 2 + KEY_WIDTH + d.width() + 1,
-        Blank => 0,
+fn group_width(g: &Group) -> usize {
+    g.items.iter().map(|(_, d)| KEY_W + d.width()).max().unwrap_or(0).max(g.title.width())
+}
+
+fn group_lines(g: &Group, x: u16) -> Vec<Line> {
+    let mut lines = vec![vec![(x, g.title.to_string(), Style { fg: AMBER, bg: DIALOG, bold: true, ..Style::default() })]];
+    for (k, d) in g.items {
+        lines.push(vec![
+            (x, format!(" {k} "), Style { fg: TEXT, bg: CHIP, ..Style::default() }),
+            (x + KEY_W as u16, d.to_string(), Style { fg: MUTED, bg: DIALOG, ..Style::default() }),
+        ]);
     }
+    lines
+}
+
+/// 内側の幅 `inner` に合わせた全行（2 列に入るなら 2 列）．
+fn lines(inner: u16) -> Vec<Line> {
+    let mut out: Vec<Line> = Vec::new();
+    for text in INTRO {
+        out.push(vec![(0, text.to_string(), Style { fg: MUTED, bg: DIALOG, ..Style::default() })]);
+    }
+    out.push(Vec::new());
+
+    let col_w = GROUPS.iter().map(group_width).max().unwrap_or(0) as u16 + 2;
+    let two = inner >= col_w * 2;
+    if two {
+        for pair in GROUPS.chunks(2) {
+            let left = group_lines(&pair[0], 0);
+            let right = pair.get(1).map(|g| group_lines(g, col_w)).unwrap_or_default();
+            for i in 0..left.len().max(right.len()) {
+                let mut line = left.get(i).cloned().unwrap_or_default();
+                line.extend(right.get(i).cloned().unwrap_or_default());
+                out.push(line);
+            }
+            out.push(Vec::new());
+        }
+    } else {
+        for g in GROUPS {
+            out.extend(group_lines(g, 0));
+            out.push(Vec::new());
+        }
+    }
+    out.pop();
+    out
+}
+
+/// 枠の位置と大きさ（ステータス行にはかからないようにする）．
+fn geometry(fw: u16, fh: u16) -> Option<Geometry> {
+    let area_h = fh.saturating_sub(1);
+    let w = fw.saturating_sub(4).min(104);
+    let inner = w.saturating_sub(6);
+    let h = (lines(inner).len() as u16 + 4).min(area_h);
+    if w < 20 || h < 6 {
+        return None;
+    }
+    Some(Geometry { x0: (fw - w) / 2, y0: (area_h - h) / 2, w, h })
 }
 
 impl Help {
@@ -129,7 +190,7 @@ impl Help {
     }
 
     pub fn scroll(&mut self, delta: isize, fw: u16, fh: u16) {
-        let max = geometry(fw, fh).map_or(0, |g| LINES.len().saturating_sub(g.visible()));
+        let max = geometry(fw, fh).map_or(0, |g| lines(g.w.saturating_sub(6)).len().saturating_sub(g.visible()));
         self.offset = (self.offset as isize).saturating_add(delta).clamp(0, max as isize) as usize;
     }
 
@@ -138,70 +199,45 @@ impl Help {
         geometry(fw, fh).is_none_or(|g| !g.contains(x, y))
     }
 
-    /// 画面中央に枠付きで描く．`fh` はステータスバーを含む端末の高さ．
+    /// 画面中央に枠付きで描く．
     pub fn draw(&self, frame: &mut Frame) {
         let Some(g) = geometry(frame.w, frame.h) else { return };
         let Geometry { x0, y0, w, h } = g;
-        let border = Style { fg: Color::Cyan, ..Style::default() };
-        let normal = Style::default();
-        let section = Style { fg: Color::Yellow, bold: true, ..Style::default() };
-        let key = Style { fg: Color::Cyan, bold: true, ..Style::default() };
-
+        let border = Style { fg: BORDER, bg: DIALOG, ..Style::default() };
+        let blank = Style { fg: TEXT, bg: DIALOG, ..Style::default() };
         for y in y0..y0 + h {
             for x in x0..x0 + w {
                 let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + h - 1) {
-                    (true, _, true, _) => "┌",
-                    (_, true, true, _) => "┐",
-                    (true, _, _, true) => "└",
-                    (_, true, _, true) => "┘",
+                    (true, _, true, _) => "╭",
+                    (_, true, true, _) => "╮",
+                    (true, _, _, true) => "╰",
+                    (_, true, _, true) => "╯",
                     (_, _, true, _) | (_, _, _, true) => "─",
                     (true, _, _, _) | (_, true, _, _) => "│",
                     _ => " ",
                 };
-                frame.set(x, y, ch, if ch == " " { normal } else { border });
+                frame.set(x, y, ch, if ch == " " { blank } else { border });
             }
         }
-        let end = x0 + w - 1;
-        put_clipped(frame, x0 + 2, y0, TITLE, Style { bold: true, ..border }, end);
+        let end = x0 + w - 3;
+        put_clipped(frame, x0 + 3, y0 + 1, "Keyboard shortcuts", Style { fg: TEXT, bg: DIALOG, bold: true, ..Style::default() }, end);
+        let all = lines(w.saturating_sub(6));
         let visible = g.visible();
-        let more = LINES.len() > visible;
-        let footer = if more {
-            format!(" q: close  j/k: scroll  ({}-{} of {}) ", self.offset + 1, (self.offset + visible).min(LINES.len()), LINES.len())
+        let close = if all.len() > visible {
+            format!("j/k: scroll ({}-{} of {})   Esc or ?: close", self.offset + 1, (self.offset + visible).min(all.len()), all.len())
         } else {
-            " q: close ".to_string()
+            "Esc or ?: close".to_string()
         };
-        put_clipped(frame, x0 + 2, y0 + h - 1, &footer, border, end);
+        let cx = end.saturating_sub(close.width() as u16);
+        put_clipped(frame, cx, y0 + 1, &close, Style { fg: DIM, bg: DIALOG, ..Style::default() }, end);
 
-        for (i, line) in LINES.iter().skip(self.offset).take(visible).enumerate() {
-            let y = y0 + 1 + i as u16;
-            let x = x0 + 2;
-            match line {
-                Text(t) => {
-                    put_clipped(frame, x, y, t, normal, end);
-                }
-                Section(t) => {
-                    put_clipped(frame, x, y, t, section, end);
-                }
-                Key(k, d) => {
-                    put_clipped(frame, x + 2, y, k, key, end);
-                    put_clipped(frame, x + 2 + KEY_WIDTH as u16, y, d, normal, end);
-                }
-                Blank => {}
+        for (i, line) in all.iter().skip(self.offset).take(visible).enumerate() {
+            let y = y0 + 3 + i as u16;
+            for (dx, text, style) in line {
+                put_clipped(frame, x0 + 3 + dx, y, text, *style, end);
             }
         }
     }
-}
-
-/// 枠の位置と大きさ．ステータスバー（最下行）にはかからないようにする．
-fn geometry(fw: u16, fh: u16) -> Option<Geometry> {
-    let area_h = fh.saturating_sub(1);
-    let inner_w = LINES.iter().map(line_width).max().unwrap_or(0) as u16 + 2;
-    let w = (inner_w + 2).min(fw);
-    let h = (LINES.len() as u16 + 2).min(area_h);
-    if w < 10 || h < 3 {
-        return None;
-    }
-    Some(Geometry { x0: (fw - w) / 2, y0: (area_h - h) / 2, w, h })
 }
 
 #[cfg(test)]
@@ -212,18 +248,18 @@ mod tests {
     fn scroll_and_close() {
         let mut h = Help::default();
         // 背が低い端末ではスクロールできる
-        assert!(!h.feed(b"jj", 80, 12));
+        assert!(!h.feed(b"jj", 80, 14));
         assert_eq!(h.offset, 2);
-        assert!(!h.feed(b"G", 80, 12));
-        assert_eq!(h.offset, LINES.len() - 9);
-        assert!(!h.feed(b"g", 80, 12));
+        assert!(!h.feed(b"g", 80, 14));
         assert_eq!(h.offset, 0);
         // 全部入るならスクロールしない
-        assert!(!h.feed(b"j", 80, 100));
+        assert!(!h.feed(b"j", 120, 100));
         assert_eq!(h.offset, 0);
-        assert!(h.feed(b"q", 80, 12));
-        assert!(h.feed(b"\x1b", 80, 12));
-        assert!(h.click_outside(0, 0, 200, 12));
-        assert!(!h.click_outside(100, 5, 200, 12));
+        assert!(h.feed(b"q", 80, 14));
+        assert!(h.feed(b"\x1b", 80, 14));
+        assert!(h.click_outside(0, 0, 200, 14));
+        assert!(!h.click_outside(100, 5, 200, 14));
+        // 広ければ 2 列，狭ければ 1 列
+        assert!(lines(100).len() < lines(40).len());
     }
 }

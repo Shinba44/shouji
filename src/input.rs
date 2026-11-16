@@ -32,6 +32,10 @@ pub enum Action {
     ToggleMouse,
     /// ヘルプ画面を開く．
     Help,
+    /// 選択中のペインだけを大きく表示する（もう一度で戻す）．
+    Zoom,
+    /// 構成のサイドバーの表示を切り替える．
+    ToggleSidebar,
 }
 
 #[derive(Default)]
@@ -77,11 +81,16 @@ impl InputParser {
                     b'[' => actions.push(Action::ScrollMode),
                     b'm' => actions.push(Action::ToggleMouse),
                     b'?' => actions.push(Action::Help),
+                    b'z' => actions.push(Action::Zoom),
+                    b't' => actions.push(Action::ToggleSidebar),
+                    b'\t' => actions.push(Action::FocusNext),
                     // Space．Ctrl を押したままの C-Space（NUL）も受け付ける
                     b' ' | 0x00 => actions.push(Action::OpenLauncher),
                     b'n' => actions.push(Action::NextWindow),
                     b'p' => actions.push(Action::PrevWindow),
-                    b'0'..=b'9' => actions.push(Action::SelectWindow((b - b'0') as usize)),
+                    // ウィンドウ番号は 1 から（0 は 10 番目）
+                    b'1'..=b'9' => actions.push(Action::SelectWindow((b - b'1') as usize)),
+                    b'0' => actions.push(Action::SelectWindow(9)),
                     b'h' => actions.push(Action::Focus(Direction::Left)),
                     b'j' => actions.push(Action::Focus(Direction::Down)),
                     b'k' => actions.push(Action::Focus(Direction::Up)),
@@ -132,6 +141,9 @@ mod tests {
             ]
         );
         assert_eq!(p.feed(b"\x11\x11"), vec![Action::Forward(vec![PREFIX])]);
+        assert_eq!(p.feed(b"a\x07"), vec![Action::Forward(b"a\x07".to_vec())]);
+        assert_eq!(p.feed(b"\x11z\x11t"), vec![Action::Zoom, Action::ToggleSidebar]);
+        assert_eq!(p.feed(b"\x111\x110"), vec![Action::SelectWindow(0), Action::SelectWindow(9)]);
     }
 
     #[test]

@@ -3,7 +3,6 @@
 //! 1. タスクの一覧: Enter で全部を起動，→ で選択画面へ．
 //! 2. 選択画面: タスクのウィンドウとプログラムにチェックを付け，選んだものだけを起動する．
 
-use crossterm::style::Color;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::{Task, TaskEntry};
@@ -393,17 +392,18 @@ impl Launcher {
         let Some(g) = self.geometry(frame.w, frame.h, &content) else { return };
         let Geometry { x0, y0, w, h, .. } = g;
 
-        let border = Style { fg: Color::Green, ..Style::default() };
-        let normal = Style::default();
-        let sel = Style { fg: Color::Black, bg: Color::Green, ..Style::default() };
+        use crate::ui::theme::*;
+        let border = Style { fg: AMBER, bg: DIALOG, ..Style::default() };
+        let normal = Style { fg: TEXT, bg: DIALOG, ..Style::default() };
+        let sel = Style { fg: BG, bg: AMBER, ..Style::default() };
 
         for y in y0..y0 + h {
             for x in x0..x0 + w {
                 let ch = match (x == x0, x == x0 + w - 1, y == y0, y == y0 + h - 1) {
-                    (true, _, true, _) => "┌",
-                    (_, true, true, _) => "┐",
-                    (true, _, _, true) => "└",
-                    (_, true, _, true) => "┘",
+                    (true, _, true, _) => "╭",
+                    (_, true, true, _) => "╮",
+                    (true, _, _, true) => "╰",
+                    (_, true, _, true) => "╯",
                     (_, _, true, _) | (_, _, _, true) => "─",
                     (true, _, _, _) | (_, true, _, _) => "│",
                     _ => " ",

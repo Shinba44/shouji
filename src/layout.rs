@@ -25,7 +25,8 @@ pub enum Dir {
     Vertical,
 }
 
-/// ペイン間の区切り線．
+/// ペイン間の区切り線（今は枠どうしのすき間になるだけで，位置はテストでしか見ない）．
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct Separator {
     pub x: u16,
@@ -90,6 +91,22 @@ impl Node {
                 (None, None) => None,
             },
         }
+    }
+
+    /// 木に含まれるペイン（表示順）．
+    pub fn ids(&self) -> Vec<PaneId> {
+        let mut out = Vec::new();
+        fn walk(n: &Node, out: &mut Vec<PaneId>) {
+            match n {
+                Node::Leaf(id) => out.push(*id),
+                Node::Split { a, b, .. } => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+            }
+        }
+        walk(self, &mut out);
+        out
     }
 
     /// 木を `area` に割り付け，各ペインの矩形と区切り線を求める．

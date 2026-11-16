@@ -66,19 +66,26 @@ Every option is described in `sample_config/task.yaml`. `sample_config/ros.yaml`
 
 ## Keys (prefix: `Ctrl-q`)
 
+What you type always goes to the selected pane. Most things can be done with the mouse
+(tabs, the layout panel, the buttons at the bottom and in stopped panes); keyboard commands
+start with `Ctrl-q`: press `Ctrl-q`, let go, then press the key.
+
 | Key | Action |
 |---|---|
-| `C-q ?` | Show all keys (also the `? Help` button in the status bar) |
-| `C-q Space` | Open the task launcher (`Enter` starts everything, `→` picks windows/programs to start) |
+| `C-q ?` | Help |
+| `C-q Space` | Task launcher (`Enter` starts everything, `→` picks windows/programs) |
+| `C-q o`, `C-q Tab`, `C-q arrows`, `C-q h/j/k/l` | Move between panes (or click a pane) |
+| `C-q z` | Zoom the pane in / out |
 | `C-q %` / `C-q "` | Split left/right, top/bottom |
-| `C-q o`, `C-q h/j/k/l`, `C-q arrows` | Move between panes |
-| `C-q c` / `C-q n` / `C-q p` / `C-q 0-9` | New window / switch windows |
-| `C-q [` | Scroll mode (`k/j u/d g/G`, `q` to leave) |
 | `C-q x` | Close the pane |
-| `C-q m` | Toggle mouse support |
-| `C-q d` | Quit |
-| `C-q C-q` | Send a literal `Ctrl-q` |
+| `C-q c` / `C-q n` / `C-q p` / `C-q 1-9` | New window / switch windows (or click a tab) |
+| `C-q [` | Scroll back (`k/j u/d g/G`, `q` to stop; the mouse wheel works too) |
+| `C-q t` | Show / hide the layout panel |
+| `C-q m` | Mouse on / off |
+| `C-q d` | Quit (asks first) |
+| `C-q C-q` | Send `Ctrl-q` to the program |
 
-Each pane title shows the program's state (`RUNNING`, `WAITING`, `DONE`, `FAILED`, ...).
-In a pane whose program has stopped, press `r` to run it again, `s` for a shell, or `q` to close (or click the buttons at the bottom of the pane).
-Mouse support (status bar buttons, clicking, wheel scrolling) is on at startup. While it is on, select text with `Shift`+drag.
+In a pane whose program has stopped, press `r` to run it again, `s` for a shell, or `x` to close it.
+In a pane waiting to start, press `Enter` to start it now.
+Each pane title shows the program's state (`Running`, `Waiting`, `Stopped`, `Finished`, `Shell`).
+While the mouse is on, select text with `Shift`+drag. Colors need a terminal with 24-bit color.

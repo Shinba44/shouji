@@ -6,7 +6,6 @@ use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::queue;
-use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Style {
@@ -97,25 +96,11 @@ impl Frame {
         }
     }
 
-    /// 文字列を書き込み，使ったセル数を返す（全角文字は 2 セル）．画面の右端で打ち切る．
-    pub fn put_str(&mut self, x: u16, y: u16, s: &str, style: Style) -> u16 {
-        let mut buf = [0u8; 4];
-        let mut cx = x;
-        for ch in s.chars() {
-            let cw = ch.width().unwrap_or(0) as u16;
-            if cw == 0 {
-                continue;
-            }
-            if cx + cw > self.w {
-                break;
-            }
-            self.set(cx, y, ch.encode_utf8(&mut buf), style);
-            if cw == 2 {
-                self.set(cx + 1, y, "", style);
-            }
-            cx += cw;
+    /// 全体を暗くする（ヘルプなどを手前に出すとき，後ろを目立たなくする）．
+    pub fn dim_all(&mut self, fg: Color, bg: Color) {
+        for c in &mut self.cells {
+            c.style = Style { fg, bg, ..Style::default() };
         }
-        cx - x
     }
 
     fn get(&self, x: u16, y: u16) -> &Cell {
