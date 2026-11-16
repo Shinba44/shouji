@@ -427,7 +427,7 @@ impl Launcher {
 }
 
 /// `end` の手前までに収まる分だけ書く（全角文字は 2 セル）．
-fn put_clipped(frame: &mut Frame, x: u16, y: u16, s: &str, style: Style, end: u16) {
+pub fn put_clipped(frame: &mut Frame, x: u16, y: u16, s: &str, style: Style, end: u16) {
     let mut x = x;
     let mut buf = [0u8; 4];
     for ch in s.chars() {

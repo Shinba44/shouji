@@ -1,5 +1,6 @@
 mod config;
 mod deps;
+mod help;
 mod input;
 mod launcher;
 mod layout;
@@ -24,6 +25,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use config::{Config, Restart, Task, TaskEntry};
 use deps::{Dep, DepStatus, RunState, Wait};
 use input::{Action, Direction, InputParser};
+use help::Help;
 use launcher::{Launcher, MenuResult, Selection};
 use layout::{Dir, Node, PaneId, Rect, Separator};
 use mouse::{Button, Kind as MouseKind, MouseEvent};
@@ -51,9 +53,65 @@ fn put_clipped(frame: &mut Frame, x: u16, y: u16, s: &str, style: Style, end: u1
 }
 
 /// 待機中のペインに出すボタンと，それに対応するキー（クリックで押せる）．
-const WAIT_BUTTONS: [(&str, u8); 2] = [("[Enter: start now]", b'\r'), ("[q: close]", b'q')];
+/// (ボタンの文字, 狭いときの短い文字, キー)．
+const WAIT_BUTTONS: [(&str, &str, u8); 2] = [(" Enter  Start now ", " Enter Start ", b'\r'), (" q  Close ", " q Close ", b'q')];
 
-const MOUSE_HINT: &str = "マウス操作: オン（文字の選択は Shift+ドラッグ / C-q m で切替）";
+/// 終了したペインの一番下に出すボタンと，それに対応するキー．
+const EXIT_BUTTONS: [(&str, &str, u8); 3] =
+    [(" r  Run again ", " r Run ", b'r'), (" s  Shell ", " s Shell ", b's'), (" q  Close ", " q Close ", b'q')];
+
+const MOUSE_HINT: &str = "Mouse: on (Shift+drag to select text, C-q m to turn off)";
+
+/// 起動したときにステータスバーに出す案内．
+const START_HINT: &str = "New here? Press Ctrl-q, then ? to see all keys";
+
+/// 幅 `width` に入るように切り詰める（切ったら末尾を … にする）．
+fn truncate(s: &str, width: usize) -> String {
+    if s.width() <= width {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for ch in s.chars() {
+        if out.width() + ch.width().unwrap_or(0) + 1 > width {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+/// ペインの中に重ねる 1 行のボタン列を組み立てる．部品は (左端からの列, 文字列, ボタンならキー)．
+/// 幅に入らなければ，後ろの説明，前の説明を省き，ボタンを短い文字にし，最後は入りきらないボタンを省く．
+fn button_bar(head: &str, buttons: &[(&str, &str, u8)], tail: &str, width: usize) -> Vec<(usize, String, Option<u8>)> {
+    let build = |head: &str, tail: &str, short: bool| {
+        let mut parts = Vec::new();
+        let mut x = 1;
+        if !head.is_empty() {
+            parts.push((x, head.to_string(), None));
+            x += head.width() + 2;
+        }
+        for (long, short_label, key) in buttons {
+            let label = if short { short_label } else { long };
+            parts.push((x, label.to_string(), Some(*key)));
+            x += label.width() + 1;
+        }
+        if !tail.is_empty() {
+            parts.push((x + 1, tail.to_string(), None));
+        }
+        parts
+    };
+    let end = |parts: &[(usize, String, Option<u8>)]| parts.last().map_or(0, |(x, t, _)| x + t.width());
+    for (h, t, short) in [(head, tail, false), (head, "", false), ("", "", false), (head, "", true), ("", "", true)] {
+        let parts = build(h, t, short);
+        if end(&parts) <= width {
+            return parts;
+        }
+    }
+    let mut parts = build("", "", true);
+    parts.retain(|(x, t, _)| x + t.width() <= width);
+    parts
+}
 
 /// メインループに届くイベント．
 pub enum Event {
@@ -190,6 +248,7 @@ enum Click {
     Launcher,
     Scroll,
     ExitScroll,
+    Help,
 }
 
 /// ステータスバーに並べる 1 つの部品．
@@ -213,6 +272,8 @@ struct App {
     config: Config,
     /// 開いているランチャーメニュー．
     launcher: Option<Launcher>,
+    /// 開いているヘルプ画面．
+    help: Option<Help>,
     /// スクロールモード中か（アクティブなペインの過去の出力を見ている）．
     scrolling: bool,
     /// ステータスバーに出すエラー．次のキー入力かクリックで消える．
@@ -250,8 +311,9 @@ impl App {
             input: InputParser::default(),
             config,
             launcher: None,
+            help: None,
             message: None,
-            info: mouse.then(|| MOUSE_HINT.to_string()),
+            info: Some(START_HINT.to_string()),
             mouse,
             mouse_input: mouse::Extractor::default(),
             waits: HashMap::new(),
@@ -367,12 +429,12 @@ impl App {
             first_window.get_or_insert(self.windows.len() - 1);
         }
         let Some(first) = first_window else {
-            bail!("{} を起動できません: {}", task.name, failed.join(", "));
+            bail!("cannot start {}: {}", task.name, failed.join(", "));
         };
         // 表示するのはタスクの最初のウィンドウ
         self.current = first;
         if !failed.is_empty() {
-            self.message = Some(format!("起動に失敗: {}", failed.join(", ")));
+            self.message = Some(format!("failed to start: {}", failed.join(", ")));
         }
         Ok(())
     }
@@ -410,7 +472,11 @@ impl App {
 
     fn on_keys(&mut self, bytes: &[u8]) {
         self.info = None;
-        if let Some(l) = self.launcher.as_mut() {
+        if let Some(h) = self.help.as_mut() {
+            if h.feed(bytes, self.size.0, self.size.1) {
+                self.help = None;
+            }
+        } else if let Some(l) = self.launcher.as_mut() {
             self.message = None;
             let result = l.feed(bytes, self.config.tasks.len());
             self.menu_result(result);
@@ -453,7 +519,7 @@ impl App {
                     self.report(e);
                 }
             }
-            MenuResult::NothingSelected => self.message = Some("起動するものを選んでください（Space でチェック）".into()),
+            MenuResult::NothingSelected => self.message = Some("nothing selected (press Space to check items)".into()),
         }
     }
 
@@ -476,6 +542,15 @@ impl App {
         let (w, h) = self.size;
         let pressed = matches!(ev.kind, MouseKind::Press(_));
 
+        if let Some(help) = self.help.as_mut() {
+            match ev.kind {
+                MouseKind::Press(_) if help.click_outside(ev.x, ev.y, w, h) => self.help = None,
+                MouseKind::WheelUp => help.scroll(-3, w, h),
+                MouseKind::WheelDown => help.scroll(3, w, h),
+                _ => {}
+            }
+            return;
+        }
         if let Some(l) = self.launcher.as_mut() {
             match ev.kind {
                 MouseKind::Press(Button::Left) => {
@@ -581,27 +656,34 @@ impl App {
         self.scrolling = next > 0;
     }
 
-    /// 終了したペインの案内の [r: restart] などをクリックしたら，そのキーを押したことにする．
+    /// 終了したペインの一番下のボタン（r Run again など）をクリックしたら，そのキーを押したことにする．
     fn click_dead_pane(&mut self, id: PaneId, x: u16, y: u16) {
         let Some(r) = self.win().rect_of(id) else { return };
-        let Some(pane) = self.panes.get(&id) else { return };
-        if !pane.is_dead() {
+        let Some(parts) = self.exit_bar(id, r.w) else { return };
+        if r.h == 0 || y != r.y + r.h - 1 {
             return;
         }
-        // タイトル行のクリックは中身の外なので何もしない
-        let (Some(row), Some(col)) = (y.checked_sub(r.y), x.checked_sub(r.x)) else { return };
-        let line = pane.parser.lock().unwrap().screen().rows(0, r.w).nth(row as usize);
-        let Some(line) = line else { return };
+        let Some(col) = x.checked_sub(r.x) else { return };
         let col = col as usize;
-        for (label, key) in pane::EXIT_BUTTONS {
-            if let Some(idx) = line.find(label) {
-                let start = line[..idx].width();
-                if (start..start + label.width()).contains(&col) {
-                    self.dead_pane_key(id, key);
-                    return;
-                }
-            }
+        let key = parts.iter().find_map(|(px, t, key)| key.filter(|_| (*px..px + t.width()).contains(&col)));
+        if let Some(key) = key {
+            self.dead_pane_key(id, key);
         }
+    }
+
+    /// 終了したペインの一番下に出す案内とボタン（終了していなければ `None`）．
+    fn exit_bar(&self, id: PaneId, width: u16) -> Option<Vec<(usize, String, Option<u8>)>> {
+        let pane = self.panes.get(&id)?;
+        if !pane.is_dead() || self.waits.contains_key(&id) {
+            return None;
+        }
+        let head = match &pane.last_exit {
+            _ if self.restarts.contains_key(&id) => "Stopped, restarting soon".to_string(),
+            Some((true, _)) => "Finished".to_string(),
+            Some((false, what)) => format!("Stopped ({what})"),
+            None => "Stopped".to_string(),
+        };
+        Some(button_bar(&head, &EXIT_BUTTONS, "C-q [ or wheel: scroll back", width as usize))
     }
 
     fn status_click(&self, x: u16) -> Option<Click> {
@@ -632,6 +714,10 @@ impl App {
             }
             Click::Scroll => self.scrolling = true,
             Click::ExitScroll => self.stop_scrolling(),
+            Click::Help => {
+                self.stop_scrolling();
+                self.help = Some(Help::default());
+            }
         }
     }
 
@@ -646,11 +732,11 @@ impl App {
                     self.restart_counts.remove(&id);
                     self.mark_started(id);
                 }
-                Err(e) => self.message = Some(format!("再起動に失敗: {e}")),
+                Err(e) => self.message = Some(format!("failed to restart: {e}")),
             },
             b's' => {
                 if let Err(e) = p.open_shell(id, self.tx.clone()) {
-                    self.message = Some(format!("シェルを起動できません: {e}"));
+                    self.message = Some(format!("cannot start a shell: {e}"));
                 }
             }
             b'q' => self.remove_pane(id),
@@ -691,13 +777,14 @@ impl App {
             Action::ScrollMode => self.scrolling = true,
             Action::ToggleMouse => {
                 self.mouse = !self.mouse;
-                self.info = Some(if self.mouse { MOUSE_HINT.into() } else { "マウス操作: オフ（C-q m でオン）".into() });
+                self.info = Some(if self.mouse { MOUSE_HINT.into() } else { "Mouse: off (C-q m to turn on)".into() });
             }
             Action::Quit => self.quit = true,
             Action::NewWindow => {
                 let _ = self.new_window();
             }
             Action::OpenLauncher => self.launcher = Some(Launcher::default()),
+            Action::Help => self.help = Some(Help::default()),
             Action::NextWindow => self.current = (self.current + 1) % n,
             Action::PrevWindow => self.current = (self.current + n - 1) % n,
             Action::SelectWindow(i) if i < n => self.current = i,
@@ -765,12 +852,16 @@ impl App {
             let count = self.restart_counts.get(&id).copied().unwrap_or(0);
             pane.show_exit(&exit.what);
             if p.max_restarts.is_none_or(|max| count < max) {
-                let limit = p.max_restarts.map_or(String::new(), |max| format!("/{max}"));
-                pane.note(&format!("restarting in {}s ({}{limit})  q: cancel", p.restart_delay.as_secs_f64(), count + 1));
+                let limit = p.max_restarts.map_or(String::new(), |max| format!(" of {max}"));
+                pane.note(&format!(
+                    "Restarting in {}s (attempt {}{limit}). Press q to cancel.",
+                    p.restart_delay.as_secs_f64(),
+                    count + 1
+                ));
                 self.restarts.insert(id, Instant::now() + p.restart_delay);
                 self.restart_counts.insert(id, count + 1);
             } else {
-                pane.note(&format!("restart limit reached ({count} times)"));
+                pane.note(&format!("Not restarting again: it already restarted {count} times (restart.max)."));
             }
             return;
         }
@@ -791,7 +882,7 @@ impl App {
             let Some(pane) = self.panes.get_mut(&id) else { continue };
             match pane.restart(id, self.tx.clone()) {
                 Ok(()) => self.mark_started(id),
-                Err(e) => self.message = Some(format!("再起動に失敗: {e}")),
+                Err(e) => self.message = Some(format!("failed to restart: {e}")),
             }
         }
     }
@@ -841,52 +932,60 @@ impl App {
         let Some(pane) = self.panes.get_mut(&id) else { return };
         match pane.launch(id, self.tx.clone()) {
             Ok(()) => self.mark_started(id),
-            Err(e) => self.message = Some(format!("起動に失敗: {e}")),
+            Err(e) => self.message = Some(format!("failed to start: {e}")),
         }
     }
 
-    /// 待機中のペインに表示する内容．最後の行はボタン（WAIT_BUTTONS）．
+    /// 待機中のペインに表示する内容（ボタンの行は含まない．その 1 行下に wait_bar を出す）．
     fn wait_lines(&self, w: &Wait) -> Vec<(String, Style)> {
         let head = Style { fg: Color::Yellow, bold: true, ..Style::default() };
         let ok = Style { fg: Color::Green, ..Style::default() };
         let wait = Style::default();
         let ng = Style { fg: Color::Red, bold: true, ..Style::default() };
-        let button = Style { inverse: true, ..Style::default() };
+        let dim = Style { fg: Color::DarkGrey, ..Style::default() };
 
-        let mut lines = vec![(" waiting to start".to_string(), head)];
+        let mut lines = vec![(" Waiting to start".to_string(), head)];
+        let mut blocked = false;
         for d in &w.deps {
             let st = deps::status(d, &self.runs, self.panes.contains_key(&d.pane));
-            let (mark, style, note) = match st {
-                DepStatus::Met => ("[ok]", ok, String::new()),
-                DepStatus::Waiting => ("[..]", wait, String::new()),
-                DepStatus::Blocked(why) => ("[NG]", ng, format!("  ({why})")),
+            let n = &d.name;
+            let (mark, style, text) = match (st, d.cond) {
+                (DepStatus::Met, config::Cond::Done) => ("ready", ok, format!("{n} finished successfully")),
+                (DepStatus::Met, config::Cond::Started) => ("ready", ok, format!("{n} has started")),
+                (DepStatus::Waiting, config::Cond::Done) => ("waiting", wait, format!("until {n} finishes successfully")),
+                (DepStatus::Waiting, config::Cond::Started) => ("waiting", wait, format!("until {n} starts")),
+                (DepStatus::Blocked(why), _) => {
+                    blocked = true;
+                    ("blocked", ng, format!("{n} {why}"))
+                }
             };
-            lines.push((format!("   {mark} {}: {}{note}", d.name, d.cond.label()), style));
+            lines.push((format!("   {mark:<8} {text}"), style));
         }
         if !w.delay.is_zero() {
-            let state = if w.ready_since.is_some() { "  (counting)" } else { "" };
-            lines.push((format!("   then wait {}s{state}", w.delay.as_secs_f64()), wait));
+            let state = if w.ready_since.is_some() { " (counting down)" } else { "" };
+            lines.push((format!("   then     wait {}s{state}", w.delay.as_secs_f64()), wait));
         }
-        lines.push((String::new(), wait));
-        lines.push((format!(" {}  {}", WAIT_BUTTONS[0].0, WAIT_BUTTONS[1].0), button));
+        if blocked {
+            lines.push(("   It will not start by itself.".to_string(), dim));
+        }
         lines
+    }
+
+    /// 待機中のペインのボタン行（行の位置, 部品）．
+    fn wait_bar(&self, w: &Wait, width: u16) -> (u16, Vec<(usize, String, Option<u8>)>) {
+        let row = self.wait_lines(w).len() as u16 + 1;
+        (row, button_bar("", &WAIT_BUTTONS, "", width as usize))
     }
 
     /// 待機中のペインのボタンがクリックされたか調べ，押されたキーを返す．
     fn wait_button_at(&self, id: PaneId, x: u16, y: u16) -> Option<u8> {
         let (w, r) = (self.waits.get(&id)?, self.win().rect_of(id)?);
-        let lines = self.wait_lines(w);
-        let (row, col) = (y.checked_sub(r.y)?, x.checked_sub(r.x)?);
-        if row as usize != lines.len() - 1 {
+        let (row, parts) = self.wait_bar(w, r.w);
+        if y.checked_sub(r.y)? != row {
             return None;
         }
-        let line = &lines.last()?.0;
-        let col = col as usize;
-        WAIT_BUTTONS.iter().find_map(|(label, key)| {
-            let idx = line.find(label)?;
-            let start = line[..idx].width();
-            (start..start + label.width()).contains(&col).then_some(*key)
-        })
+        let col = x.checked_sub(r.x)? as usize;
+        parts.iter().find_map(|(px, t, key)| key.filter(|_| (*px..px + t.width()).contains(&col)))
     }
 
     /// 待機中のペインでのキー: Enter で今すぐ起動，q で閉じる．
@@ -961,69 +1060,78 @@ impl App {
 
         let mut items = Vec::new();
         let mut x = 0u16;
-        let mut push = |items: &mut Vec<StatusItem>, text: String, style: Style, click: Option<Click>| {
+        fn push(items: &mut Vec<StatusItem>, x: &mut u16, text: String, style: Style, click: Option<Click>) {
             let width = text.width() as u16;
-            items.push(StatusItem { x, text, style, click });
-            x = x.saturating_add(width);
-        };
-        push(&mut items, " [shouji] ".into(), bar, None);
+            items.push(StatusItem { x: *x, text, style, click });
+            *x = x.saturating_add(width);
+        }
+        push(&mut items, &mut x, " shouji ".into(), Style { bold: true, ..bar }, None);
         for (i, wn) in self.windows.iter().enumerate() {
             let mark = if i == self.current { "*" } else { "" };
             let style = if i == self.current { cur } else { bar };
-            push(&mut items, format!(" {i}:{}{mark} ", wn.name), style, Some(Click::Window(i)));
+            push(&mut items, &mut x, format!(" {i}:{}{mark} ", wn.name), style, Some(Click::Window(i)));
         }
-        if self.input.in_prefix() {
-            push(&mut items, " <PREFIX>".into(), bar, None);
-        }
-
         let buttons = || -> Vec<(String, Style, Option<Click>)> {
+            // 幅が足りなければ後ろから省くので，大事なものを前に置く
             [
-                (" +左右 ", Click::Split(Dir::Horizontal)),
-                (" +上下 ", Click::Split(Dir::Vertical)),
-                (" タスク ", Click::Launcher),
-                (" ログ ", Click::Scroll),
-                (" +ウィンドウ ", Click::NewWindow),
+                (" ? Help ", Click::Help),
+                (" Tasks ", Click::Launcher),
+                (" Split | ", Click::Split(Dir::Horizontal)),
+                (" Split - ", Click::Split(Dir::Vertical)),
+                (" New window ", Click::NewWindow),
+                (" Scroll ", Click::Scroll),
             ]
             .into_iter()
             .map(|(t, c)| (t.to_string(), btn, Some(c)))
             .collect()
         };
+        // ウィンドウ一覧の右に出す 1 つの知らせ（プレフィックス・スクロール中・エラー・お知らせ）と，右寄せのボタン
         let mut right: Vec<(String, Style, Option<Click>)> = Vec::new();
-        if self.scrolling {
+        let note_item = if self.input.in_prefix() {
+            right = if self.mouse { buttons() } else { Vec::new() };
+            Some((" Ctrl-q pressed: now press a key (? for help) ".to_string(), yellow))
+        } else if self.scrolling {
             let (off, len) = self.panes.get(&self.win().active).map_or((0, 0), |p| {
                 let parser = p.parser.lock().unwrap();
                 (parser.screen().scrollback(), parser.screen().scrollback_len())
             });
-            push(&mut items, " ".into(), bar, None);
-            push(&mut items, format!(" SCROLL {off}/{len}  k/j u/d g/G q:exit "), yellow, None);
             if self.mouse {
-                right.push((" スクロール終了 ".into(), btn, Some(Click::ExitScroll)));
+                right.push((" Stop scrolling ".into(), btn, Some(Click::ExitScroll)));
             }
-        } else if let Some(msg) = &self.message {
-            push(&mut items, " ".into(), bar, None);
-            push(&mut items, format!(" {msg} "), err, None);
+            Some((format!(" SCROLLING {off}/{len} lines back  k/j u/d g/G, q: stop "), yellow))
         } else {
-            if let Some(info) = &self.info {
-                push(&mut items, " ".into(), bar, None);
-                push(&mut items, format!(" {info} "), note, None);
-            }
             if self.mouse {
                 right = buttons();
             } else {
-                let help = "C-q Space launch | c new | n/p/0-9 win | %/\" split | o/arrows move | [ scroll | m mouse | x kill | d quit ";
-                let short = "C-q Space: launcher ";
-                if let Some(t) = [help, short].into_iter().find(|t| x as usize + t.width() < w as usize) {
-                    right.push((t.to_string(), bar, None));
-                }
+                right.push((" C-q Space: tasks  C-q ?: help ".into(), bar, None));
             }
-        }
+            match (&self.message, &self.info) {
+                (Some(msg), _) => Some((format!(" {msg} "), err)),
+                (None, Some(info)) => Some((format!(" {info} "), note)),
+                (None, None) => None,
+            }
+        };
 
-        // 右寄せ．入りきらなければ後ろのボタンから省く
+        // 幅が足りなければ，まずボタンを後ろから（先頭の ? Help は残す）省き，次に知らせを切り詰める
         let total = |r: &[(String, Style, Option<Click>)]| -> u16 {
             r.iter().map(|(t, _, _)| t.width() as u16 + 1).sum::<u16>().saturating_sub(1)
         };
+        let note_w = note_item.as_ref().map_or(0, |(t, _)| t.width() as u16 + 1);
+        while right.len() > 1 && x as u32 + note_w as u32 + 1 + total(&right) as u32 > w as u32 {
+            right.pop();
+        }
+        if right.len() == 1 && right[0].2.is_none() && x as u32 + note_w as u32 + 1 + total(&right) as u32 > w as u32 {
+            right[0].0 = " C-q ?: help ".into();
+        }
         while !right.is_empty() && x as u32 + 1 + total(&right) as u32 > w as u32 {
             right.pop();
+        }
+        if let Some((text, style)) = note_item {
+            let room = (w as usize).saturating_sub(x as usize + 2 + total(&right) as usize);
+            if room >= 8 {
+                push(&mut items, &mut x, " ".into(), bar, None);
+                push(&mut items, &mut x, truncate(&text, room), style, None);
+            }
         }
         let mut rx = w.saturating_sub(total(&right));
         for (text, style, click) in right {
@@ -1032,6 +1140,29 @@ impl App {
             rx = rx.saturating_add(width + 1);
         }
         items
+    }
+
+    /// ペインのタイトルに付ける状態の札．設定のプログラムでないシェルのペインには付けない．
+    fn badge(&self, id: PaneId, pane: &Pane) -> Option<(String, Style)> {
+        let style = |fg, bg| Style { fg, bg, bold: true, ..Style::default() };
+        let (text, style) = if self.waits.contains_key(&id) {
+            ("WAITING".to_string(), style(Color::Black, Color::Yellow))
+        } else if self.restarts.contains_key(&id) {
+            ("RESTARTING".to_string(), style(Color::Black, Color::Yellow))
+        } else if pane.is_dead() {
+            match &pane.last_exit {
+                Some((true, _)) => ("DONE".to_string(), style(Color::Black, Color::Cyan)),
+                Some((false, what)) => (format!("FAILED ({what})"), style(Color::White, Color::Red)),
+                None => ("STOPPED".to_string(), style(Color::White, Color::Red)),
+            }
+        } else if pane.running_shell() {
+            ("SHELL".to_string(), style(Color::Black, Color::White))
+        } else if pane.program().is_some() {
+            ("RUNNING".to_string(), style(Color::Green, Color::Black))
+        } else {
+            return None;
+        };
+        Some((format!(" {text} "), style))
     }
 
     /// 現在の状態からフレームを組み立てる．
@@ -1060,9 +1191,36 @@ impl App {
                     frame.set(r.x + col, r.y + row, text, style);
                 }
             }
+            let end = r.x + r.w;
+            let button = Style { fg: Color::Black, bg: Color::White, bold: true, ..Style::default() };
             if let Some(w) = self.waits.get(id) {
                 for (i, (line, style)) in self.wait_lines(w).iter().enumerate().take(r.h as usize) {
-                    put_clipped(&mut frame, r.x, r.y + i as u16, line, *style, r.x + r.w);
+                    put_clipped(&mut frame, r.x, r.y + i as u16, line, *style, end);
+                }
+                let (row, parts) = self.wait_bar(w, r.w);
+                if row < r.h {
+                    for (x, text, _) in parts {
+                        put_clipped(&mut frame, r.x + x as u16, r.y + row, &text, button, end);
+                    }
+                }
+            } else if let (Some(parts), true) = (self.exit_bar(*id, r.w), r.h > 0) {
+                // 終了したペイン: 一番下の行に案内とボタンを重ねる
+                let y = r.y + r.h - 1;
+                let bar = Style { fg: Color::White, bg: Color::DarkGrey, ..Style::default() };
+                let head = match pane.last_exit {
+                    Some((true, _)) => Style { fg: Color::Cyan, bg: Color::DarkGrey, bold: true, ..Style::default() },
+                    _ => Style { fg: Color::Red, bg: Color::DarkGrey, bold: true, ..Style::default() },
+                };
+                for x in r.x..end {
+                    frame.set(x, y, " ", bar);
+                }
+                for (i, (x, text, key)) in parts.iter().enumerate() {
+                    let style = match (key, i) {
+                        (Some(_), _) => button,
+                        (None, 0) if !text.starts_with("C-q") => head,
+                        _ => Style { fg: Color::Grey, ..bar },
+                    };
+                    put_clipped(&mut frame, r.x + *x as u16, y, text, style, end);
                 }
             }
             if *id == win.active {
@@ -1114,20 +1272,14 @@ impl App {
             }
             let pane = self.panes.get(id);
             let program = pane.and_then(Pane::program);
-            let state = if self.waits.contains_key(id) {
-                " [waiting]"
-            } else if self.restarts.contains_key(id) {
-                " [restarting]"
-            } else if pane.is_some_and(Pane::is_dead) {
-                " [exited]"
-            } else if pane.is_some_and(Pane::running_shell) {
-                " (shell)"
-            } else {
-                ""
-            };
             let name = program.map_or("shell", |p| p.name.as_str());
             let end = t.x + t.w;
-            let mut x = t.x + put_clipped(&mut frame, t.x, t.y, &format!(" {name}{state} "), bar, end);
+            let mut x = t.x + put_clipped(&mut frame, t.x, t.y, &format!(" {name} "), bar, end);
+            // 状態の札（色付き）: RUNNING / WAITING / RESTARTING / DONE / FAILED / SHELL
+            if let Some((text, style)) = pane.and_then(|p| self.badge(*id, p)) {
+                x += put_clipped(&mut frame, x, t.y, &text, style, end);
+                x += put_clipped(&mut frame, x, t.y, " ", bar, end);
+            }
             // PID（外から kill するとき用）．前面のプロセスが別なら fg も出す
             if let Some((pid, fg)) = pane.and_then(Pane::pids) {
                 let text = match fg {
@@ -1147,6 +1299,10 @@ impl App {
             l.draw(&mut frame, &self.config.tasks);
             cursor = None;
         }
+        if let Some(help) = &self.help {
+            help.draw(&mut frame);
+            cursor = None;
+        }
 
         // ステータスバー
         if h > 0 {
@@ -1163,18 +1319,39 @@ impl App {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn button_bar_shrinks() {
+        let labels = |parts: Vec<(usize, String, Option<u8>)>| parts.into_iter().map(|(_, t, _)| t).collect::<Vec<_>>().join("|");
+        // 広ければ全部
+        assert_eq!(labels(button_bar("Stopped", &EXIT_BUTTONS, "tail", 100)), "Stopped| r  Run again | s  Shell | q  Close |tail");
+        // 後ろの説明から省く
+        assert_eq!(labels(button_bar("Stopped", &EXIT_BUTTONS, "tail", 50)), "Stopped| r  Run again | s  Shell | q  Close ");
+        // ボタン 3 つは短い文字で必ず入れる
+        assert_eq!(labels(button_bar("Stopped (code 1)", &EXIT_BUTTONS, "tail", 30)), " r Run | s Shell | q Close ");
+        // それでも入らなければ入る分だけ
+        assert_eq!(labels(button_bar("x", &EXIT_BUTTONS, "", 12)), " r Run ");
+        // 位置は 1 列目から，間は 1 列
+        let parts = button_bar("", &WAIT_BUTTONS, "", 100);
+        assert_eq!((parts[0].0, parts[1].0), (1, 1 + " Enter  Start now ".width() + 1));
+    }
+}
+
 fn main() -> Result<()> {
     if std::env::var_os("SHOUJI").is_some() {
-        bail!("shouji の中で shouji は起動できません");
+        bail!("shouji cannot be started inside shouji (SHOUJI is set)");
     }
 
     // 設定は raw モードに入る前に読む（エラーを普通に表示するため）
     const USAGE: &str = "usage: shouji [-c CONFIG.yaml] [-t TASK.yaml [NAME...]]...\n\
-        \n  -c, --config FILE     設定ファイル（省略時は ./shouji.yaml → ~/.config/shouji/config.yaml）\
-        \n  -t, --task FILE       起動時に開くタスクファイル（複数指定可）\
-        \n                        続けて NAME（ウィンドウ名かプログラム名）を書くと，それだけを起動する\
-        \n                        例: shouji -t task.yaml app        app ウィンドウのプログラムすべて\
-        \n                            shouji -t task.yaml build server  build と server だけ";
+        \n  -c, --config FILE     config file (default: ./shouji.yaml, then ~/.config/shouji/config.yaml)\
+        \n  -t, --task FILE       task file to open at startup (can be repeated)\
+        \n                        NAMEs (window or program names) after it start only those\
+        \n                        e.g. shouji -t task.yaml app           every program in the app window\
+        \n                             shouji -t task.yaml build server  only build and server";
     let mut config_path = None;
     // (タスクファイル, 起動するものの名前)
     let mut task_args: Vec<(String, Vec<String>)> = Vec::new();
@@ -1187,11 +1364,11 @@ fn main() -> Result<()> {
                 println!("{USAGE}");
                 return Ok(());
             }
-            _ if arg.starts_with('-') => bail!("不明な引数: {arg}\n{USAGE}"),
+            _ if arg.starts_with('-') => bail!("unknown argument: {arg}\n{USAGE}"),
             // -t FILE に続く名前
             _ => match task_args.last_mut() {
                 Some((_, names)) => names.push(arg),
-                None => bail!("{arg}: 名前は -t TASK.yaml の後ろに書いてください\n{USAGE}"),
+                None => bail!("{arg}: names must come after -t TASK.yaml\n{USAGE}"),
             },
         }
     }
@@ -1204,7 +1381,7 @@ fn main() -> Result<()> {
     for (path, names) in task_args {
         let entry = TaskEntry::new(&path, None, &cwd);
         // 名前の間違いもここで報告する
-        entry.load()?.select(&names).with_context(|| format!("{path} で起動するものを選べません"))?;
+        entry.load()?.select(&names).with_context(|| format!("cannot select programs in {path}"))?;
         startup.push((config.add_task(entry), names));
     }
 

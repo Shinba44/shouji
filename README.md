@@ -68,6 +68,7 @@ Every option is described in `sample_config/task.yaml`. `sample_config/ros.yaml`
 
 | Key | Action |
 |---|---|
+| `C-q ?` | Show all keys (also the `? Help` button in the status bar) |
 | `C-q Space` | Open the task launcher (`Enter` starts everything, `→` picks windows/programs to start) |
 | `C-q %` / `C-q "` | Split left/right, top/bottom |
 | `C-q o`, `C-q h/j/k/l`, `C-q arrows` | Move between panes |
@@ -78,5 +79,6 @@ Every option is described in `sample_config/task.yaml`. `sample_config/ros.yaml`
 | `C-q d` | Quit |
 | `C-q C-q` | Send a literal `Ctrl-q` |
 
-In a pane whose program has exited, press `r` to restart, `s` for a shell, or `q` to close.
+Each pane title shows the program's state (`RUNNING`, `WAITING`, `DONE`, `FAILED`, ...).
+In a pane whose program has stopped, press `r` to run it again, `s` for a shell, or `q` to close (or click the buttons at the bottom of the pane).
 Mouse support (status bar buttons, clicking, wheel scrolling) is on at startup. While it is on, select text with `Shift`+drag.

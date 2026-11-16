@@ -88,10 +88,9 @@ pub struct Pane {
     log: Option<Arc<Mutex<LogFile>>>,
     /// ユーザーに伝えたい問題（ログファイルを開けないなど）．App が取り出して表示する．
     pub warning: Option<String>,
+    /// 最後に終了したプロセスの終わり方（正常終了か，"code 1" などの説明）．
+    pub last_exit: Option<(bool, String)>,
 }
-
-/// 終了時の案内に出すボタンと，それに対応するキー（クリックで押せる）．
-pub const EXIT_BUTTONS: [(&str, u8); 3] = [("[r: restart]", b'r'), ("[s: shell]", b's'), ("[q: close]", b'q')];
 
 /// スクロールバックとして保持する行数．
 const SCROLLBACK: usize = 10_000;
@@ -120,7 +119,7 @@ impl Pane {
             None => (None, None),
             Some(path) => match LogFile::open(path) {
                 Ok(f) => (Some(Arc::new(Mutex::new(f))), None),
-                Err(e) => (None, Some(format!("ログファイル {} を開けません: {e}", path.display()))),
+                Err(e) => (None, Some(format!("cannot open log file {}: {e}", path.display()))),
             },
         };
         Self {
@@ -132,6 +131,7 @@ impl Pane {
             closing: false,
             log,
             warning,
+            last_exit: None,
         }
     }
 
@@ -298,12 +298,15 @@ impl Pane {
         if let Some(log) = &self.log {
             log.lock().unwrap().marker(&format!("exited ({what})"));
         }
-        Some(Exit { success: status.as_ref().is_some_and(|s| s.success()), what, was_program: proc.is_program })
+        let success = status.as_ref().is_some_and(|s| s.success());
+        self.last_exit = Some((success, what.clone()));
+        Some(Exit { success, what, was_program: proc.is_program })
     }
 
-    /// 終了ステータスと，再起動・シェル・閉じるのボタンを画面に書き込む．
+    /// 終了したことを 1 行だけ画面に書き込む（過去の出力に記録として残る）．
+    /// 再起動・シェル・閉じるのボタンは画面の一番下に重ねて描く（App::exit_bar）．
     pub fn show_exit(&mut self, what: &str) {
-        let msg = format!("\x1b[0m\r\n\x1b[7m [exited ({what})]  [r: restart]  [s: shell]  [q: close]  C-q [: scroll \x1b[0m\r\n");
+        let msg = format!("\x1b[0m\r\n\x1b[2m--- exited ({what}) ---\x1b[0m\r\n");
         self.parser.lock().unwrap().process(msg.as_bytes());
     }
 

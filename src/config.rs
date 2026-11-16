@@ -53,8 +53,8 @@ fn resolve(path: &str, base: &Path) -> PathBuf {
 }
 
 fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("{} を読めません", path.display()))?;
-    serde_yaml_ng::from_str(&text).with_context(|| format!("{} の書式が不正です", path.display()))
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    serde_yaml_ng::from_str(&text).with_context(|| format!("invalid format in {}", path.display()))
 }
 
 // ---- shouji.yaml ----
@@ -69,7 +69,7 @@ struct RawConfig {
 #[derive(Debug, Deserialize)]
 #[serde(
     untagged,
-    expecting = "タスクはパスの文字列か，path と name（省略可）だけを持つ項目で書いてください"
+    expecting = "a task must be a path string, or an entry with path and (optional) name"
 )]
 enum RawTaskEntry {
     Path(String),
@@ -200,7 +200,7 @@ struct RawProgram {
 #[derive(Debug, Deserialize)]
 #[serde(
     untagged,
-    expecting = "restart は never / on-failure / always か，when・delay・max を持つ項目で書いてください"
+    expecting = "restart must be never / on-failure / always, or an entry with when, delay and max"
 )]
 enum RawRestart {
     When(Restart),
@@ -230,7 +230,7 @@ pub enum Restart {
 
 /// `after` の 1 項目: `- build` か `- build: done`．
 #[derive(Debug, Deserialize)]
-#[serde(untagged, expecting = "after の項目は  - 名前  か  - 名前: started / done  で書いてください")]
+#[serde(untagged, expecting = "each after item must be  - NAME  or  - NAME: started / done")]
 enum RawAfter {
     Name(String),
     WithCond(BTreeMap<String, Cond>),
@@ -244,15 +244,6 @@ pub enum Cond {
     Started,
     /// 正常終了（終了コード 0）したら．
     Done,
-}
-
-impl Cond {
-    pub fn label(self) -> &'static str {
-        match self {
-            Cond::Started => "started",
-            Cond::Done => "done",
-        }
-    }
 }
 
 fn default_true() -> bool {
@@ -326,7 +317,7 @@ impl TaskEntry {
     pub fn load(&self) -> Result<Task> {
         let raw: RawTask = read_yaml(&self.path)?;
         let base = self.path.parent().map(Path::to_path_buf).unwrap_or_default();
-        Task::from_raw(raw, &self.name, &base).with_context(|| format!("{} の書式が不正です", self.path.display()))
+        Task::from_raw(raw, &self.name, &base).with_context(|| format!("invalid format in {}", self.path.display()))
     }
 }
 
@@ -337,14 +328,14 @@ impl Task {
         let raw_windows = match (raw.programs, raw.windows) {
             (Some(programs), None) => vec![RawWindow { name: task_name.clone(), env: BTreeMap::new(), pre_command: None, programs }],
             (None, Some(windows)) => windows,
-            (Some(_), Some(_)) => bail!("programs と windows はどちらか一方だけ書いてください"),
-            (None, None) => bail!("programs か windows を書いてください"),
+            (Some(_), Some(_)) => bail!("write either programs or windows, not both"),
+            (None, None) => bail!("write programs or windows"),
         };
         let mut windows = Vec::with_capacity(raw_windows.len());
         let mut all = Vec::new();
         for w in raw_windows {
             if w.programs.is_empty() {
-                bail!("ウィンドウ {} の programs が空です", w.name);
+                bail!("window {} has no programs", w.name);
             }
             let start = all.len();
             // env は タスク全体 → ウィンドウ → プログラム の順に重ね，狭い領域の値を優先する
@@ -366,9 +357,9 @@ impl Task {
             let mut found = names.iter().enumerate().filter(|(_, n)| **n == target).map(|(i, _)| i);
             match (found.next(), found.next()) {
                 (Some(i), None) if target != me => Ok(i),
-                (Some(_), None) => bail!("{me}: 自分自身を after に書くことはできません"),
-                (Some(_), Some(_)) => bail!("{me}: after の {target} という名前のプログラムが複数あります"),
-                (None, _) => bail!("{me}: after の {target} という名前のプログラムがありません"),
+                (Some(_), None) => bail!("{me}: a program cannot wait for itself in after"),
+                (Some(_), Some(_)) => bail!("{me}: more than one program is named {target} (in after)"),
+                (None, _) => bail!("{me}: no program named {target} (in after)"),
             }
         };
 
@@ -380,7 +371,7 @@ impl Task {
                     RawAfter::Name(n) => after.push((index_of(&p.name, n)?, Cond::Started)),
                     RawAfter::WithCond(map) => {
                         if map.len() != 1 {
-                            bail!("{}: after の項目には 1 つずつ書いてください（例: - build: done）", p.name);
+                            bail!("{}: write one program per after item (e.g. - build: done)", p.name);
                         }
                         let (n, cond) = map.iter().next().unwrap();
                         after.push((index_of(&p.name, n)?, *cond));
@@ -390,7 +381,7 @@ impl Task {
             let secs = |key: &str, v: Option<f64>, default: f64| -> Result<Duration> {
                 match v.unwrap_or(default) {
                     d if d.is_finite() && d >= 0.0 => Ok(Duration::from_secs_f64(d)),
-                    d => bail!("{}: {key} は 0 以上の秒数で書いてください（{d}）", p.name),
+                    d => bail!("{}: {key} must be a number of seconds, 0 or more ({d})", p.name),
                 }
             };
             let delay = secs("delay", p.delay, 0.0)?;
@@ -439,12 +430,12 @@ impl Task {
             match (window, program) {
                 (Some(w), None) => w.programs.iter().for_each(|&k| selected[k] = true),
                 (None, Some(k)) => selected[k] = true,
-                (Some(_), Some(_)) => bail!("{name} はウィンドウ名とプログラム名の両方にあるため区別できません"),
+                (Some(_), Some(_)) => bail!("{name} is both a window and a program name, so it is ambiguous"),
                 (None, None) => {
                     let windows: Vec<&str> = self.windows.iter().map(|w| w.name.as_str()).collect();
                     let programs: Vec<&str> = self.programs.iter().map(|p| p.name.as_str()).collect();
                     bail!(
-                        "{name} というウィンドウもプログラムもありません（ウィンドウ: {} / プログラム: {}）",
+                        "no window or program named {name} (windows: {} / programs: {})",
                         windows.join(", "),
                         programs.join(", ")
                     );
@@ -481,7 +472,7 @@ fn check_cycle(programs: &[Program]) -> Result<()> {
                 let start = path.iter().position(|&p| p == i).unwrap_or(0);
                 let mut names: Vec<&str> = path[start..].iter().map(|&p| programs[p].name.as_str()).collect();
                 names.push(&programs[i].name);
-                bail!("after が循環しています: {}", names.join(" → "));
+                bail!("after has a cycle: {}", names.join(" → "));
             }
             _ => {}
         }
@@ -568,11 +559,11 @@ mod tests {
         assert_eq!((c.restart, c.restart_delay, c.max_restarts), (Restart::Always, Duration::from_secs(1), None));
 
         let e = |y: &str| format!("{:#}", task(y).unwrap_err());
-        assert!(e("programs:\n  - name: a\n    command: x\n    restart: sometimes\n").contains("restart は"));
+        assert!(e("programs:\n  - name: a\n    command: x\n    restart: sometimes\n").contains("restart must be"));
         // 入れ子の中の不明な項目や，以前の書き方はエラーにする
-        assert!(e("programs:\n  - name: a\n    command: x\n    restart:\n      when: always\n      retries: 3\n").contains("restart は"));
+        assert!(e("programs:\n  - name: a\n    command: x\n    restart:\n      when: always\n      retries: 3\n").contains("restart must be"));
         assert!(e("programs:\n  - name: a\n    command: x\n    restart: always\n    max_restarts: 3\n").contains("max_restarts"));
-        assert!(e("programs:\n  - name: a\n    command: x\n    restart:\n      when: always\n      delay: -1\n").contains("restart.delay は 0 以上"));
+        assert!(e("programs:\n  - name: a\n    command: x\n    restart:\n      when: always\n      delay: -1\n").contains("restart.delay must be a number of seconds"));
     }
 
     #[test]
@@ -631,9 +622,9 @@ mod tests {
 
         let mut t = task(yaml).unwrap();
         let e = format!("{:#}", t.select(&names(&["nope"])).unwrap_err());
-        assert!(e.contains("nope というウィンドウもプログラムもありません") && e.contains("ウィンドウ: app, tools"));
+        assert!(e.contains("no window or program named nope") && e.contains("windows: app, tools"));
         let mut t = task("windows:\n  - name: x\n    programs:\n      - name: x\n        command: y\n").unwrap();
-        assert!(format!("{:#}", t.select(&names(&["x"])).unwrap_err()).contains("区別できません"));
+        assert!(format!("{:#}", t.select(&names(&["x"])).unwrap_err()).contains("ambiguous"));
     }
 
     #[test]
@@ -654,20 +645,20 @@ mod tests {
         assert_eq!(t.windows[0].name, "t");
 
         let e = |y: &str| format!("{:#}", task(y).unwrap_err());
-        assert!(e("programs:\n  - name: a\n    command: x\nwindows: []\n").contains("どちらか一方"));
-        assert!(e("name: x\n").contains("programs か windows"));
-        assert!(e("windows:\n  - name: w\n    programs: []\n").contains("ウィンドウ w の programs が空"));
+        assert!(e("programs:\n  - name: a\n    command: x\nwindows: []\n").contains("not both"));
+        assert!(e("name: x\n").contains("write programs or windows"));
+        assert!(e("windows:\n  - name: w\n    programs: []\n").contains("window w has no programs"));
     }
 
     #[test]
     fn after_errors() {
         let e = |y: &str| format!("{:#}", task(y).unwrap_err());
-        assert!(e("programs:\n  - name: a\n    command: x\n    after: [b]\n").contains("b という名前のプログラムがありません"));
-        assert!(e("programs:\n  - name: a\n    command: x\n    after: [a]\n").contains("自分自身"));
+        assert!(e("programs:\n  - name: a\n    command: x\n    after: [b]\n").contains("no program named b"));
+        assert!(e("programs:\n  - name: a\n    command: x\n    after: [a]\n").contains("cannot wait for itself"));
         assert!(e("programs:\n  - name: a\n    command: x\n    after: [b]\n  - name: b\n    command: y\n    after: [a]\n")
-            .contains("循環しています: a → b → a"));
-        assert!(e("programs:\n  - name: a\n    command: x\n  - name: b\n    command: y\n    after:\n      - a: finished\n").contains("after の項目は"));
-        assert!(e("programs:\n  - name: a\n    command: x\n    delay: -1\n").contains("delay は 0 以上"));
+            .contains("cycle: a → b → a"));
+        assert!(e("programs:\n  - name: a\n    command: x\n  - name: b\n    command: y\n    after:\n      - a: finished\n").contains("each after item must be"));
+        assert!(e("programs:\n  - name: a\n    command: x\n    delay: -1\n").contains("delay must be a number of seconds"));
     }
 
     #[test]

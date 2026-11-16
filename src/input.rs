@@ -30,6 +30,8 @@ pub enum Action {
     ScrollMode,
     /// マウス操作のオン・オフを切り替える．
     ToggleMouse,
+    /// ヘルプ画面を開く．
+    Help,
 }
 
 #[derive(Default)]
@@ -74,6 +76,7 @@ impl InputParser {
                     b'c' => actions.push(Action::NewWindow),
                     b'[' => actions.push(Action::ScrollMode),
                     b'm' => actions.push(Action::ToggleMouse),
+                    b'?' => actions.push(Action::Help),
                     // Space．Ctrl を押したままの C-Space（NUL）も受け付ける
                     b' ' | 0x00 => actions.push(Action::OpenLauncher),
                     b'n' => actions.push(Action::NextWindow),
