@@ -3,7 +3,7 @@
 //! ```text
 //!    1  app ●     2  tools                   Tasks    + Window    Split │    Split ─    ? Help
 //! ──────────────────────────────────────────────────────────────────────────────────────────
-//! ┌ Layout ──────┐ ╭─ SELECTED  build  cargo build ─────────── ● Running ─╮
+//! ┌ Layout ──────┐ ╭─ build  cargo build ─────── pid 42  ● Running  Stop ─╮
 //! │ 1 app        │ │ ...                                                   │
 //! │   ├ build  ● │ ╰───────────────────────────────────────────────────────╯
 //! │ ● running    │
@@ -230,23 +230,23 @@ impl App {
     }
 
     /// 動いているプログラムに stop があれば，タイトルの右端（pid・状態の右）に出す Stop ボタン．`b` は枠．
+    /// タイトルの中で一番優先して出す（狭いときは pid・状態・名前の方を削る）．
     fn stop_button(&self, id: PaneId, b: Rect) -> Option<Part> {
         let pane = self.panes.get(&id)?;
         pane.program()?.stop.as_ref()?;
         if pane.is_dead() || self.waits.contains_key(&id) || b.h < 3 {
             return None;
         }
-        let (right, status, _) = self.title_right(id, pane);
-        let rw = (right.width() + status.width()) as u16;
-        let text = if self.stopping.contains_key(&id) { " Force stop " } else { " Stop " };
+        let forcing = self.stopping.contains_key(&id);
+        let text = if forcing { " Force stop " } else { " Stop " };
         let bw = text.width() as u16;
-        let x1 = b.x + b.w - 1;
-        // 名前の分（20 文字ほど）を残せないほど狭ければ出さない
-        if b.w < rw + bw + 24 {
+        // 左の角と名前の頭（数文字）が残る幅があれば出す
+        if b.w < bw + 8 {
             return None;
         }
-        let x = x1 - 1 - bw;
-        Some(Part::new(x, b.y, text, bold(TEXT, BUTTON), x1).click(Click::Stop(id)))
+        let x1 = b.x + b.w - 1;
+        let face = if forcing { bold(BG, RED) } else { bold(RED, RED_BG) };
+        Some(Part::new(x1 - 1 - bw, b.y, text, face, x1).click(Click::Stop(id)))
     }
 
     /// クリックした位置の部品．
@@ -381,7 +381,12 @@ impl App {
         let mut parts = Vec::new();
         let name = self.active_name();
 
-        // 1 行目: いまの状態の説明（エラーやお知らせがあればそちら）
+        // ボタンの行は最下行に置かない: 端末は窓の下の余白（行に満たない部分や padding）での
+        // クリックも最下行として送ってくるので，ボタンの下の余白まで押せてしまう．
+        // そのため 2 行あるときは，ボタンを上の行，クリックできない説明を最下行に置く．
+        let button_y = if rows == 2 { h - 2 } else { h - 1 };
+
+        // いまの状態の説明（エラーやお知らせがあればそちら）
         if rows == 2 {
             let (text, color) = if let Some(msg) = &self.message {
                 (msg.clone(), RED)
@@ -397,10 +402,10 @@ impl App {
             } else {
                 (format!("What you type goes to \"{name}\". Click another pane to switch."), MUTED)
             };
-            parts.push(Part::new(1, h - 2, text, style(color, PANEL), w));
+            parts.push(Part::new(1, h - 1, text, style(color, PANEL), w));
         }
 
-        // 2 行目: よく使う操作のボタン（札はキーボードでの操作）
+        // よく使う操作のボタン（札はキーボードでの操作）
         let mut hints = if self.confirm_quit {
             vec![
                 hint("d", "Detach (keep running)", Some(b"d")),
@@ -433,7 +438,7 @@ impl App {
             let i = hints.len() - 3;
             hints.remove(i);
         }
-        let mut row = Row::new(1, h - 1, w);
+        let mut row = Row::new(1, button_y, w);
         for h in &hints {
             row.hint(h.key, &h.label, h.hot, h.keys.map(Click::Keys), PANEL);
         }
@@ -612,24 +617,31 @@ impl App {
             // 右端の Stop ボタン（chrome で描く）とすき間 1 文字の分
             let bw = self.stop_button(*id, *b).map_or(0, |p| p.width() + 1);
             let mut left_end = x1.saturating_sub(1 + bw);
-            if b.w > rw + bw + 16 {
-                let rx = x1 - 1 - bw - rw;
+            // Stop の左の残り．名前（12 文字まで）の分を残してから，pid → 状態の文字 → ● の順に削る
+            let program = pane.program();
+            let name = program.map_or("shell", |p| p.name.as_str());
+            let nw = (name.width() as u16 + 2).min(12);
+            let room = left_end.saturating_sub(b.x + 2);
+            let sw = status.width() as u16;
+            if room >= rw + nw {
+                let rx = left_end - rw;
                 let used = put_clipped(&mut frame, rx, b.y, &right, style(FAINT, BG), x1);
                 put_clipped(&mut frame, rx + used, b.y, &status, style(color, BG), x1);
                 left_end = rx;
-            } else if b.w > 12 {
+            } else if room >= sw + nw {
+                let rx = left_end - sw;
+                put_clipped(&mut frame, rx, b.y, &status, style(color, BG), x1);
+                left_end = rx;
+            } else if room >= 3 + nw {
                 // 狭いときは状態の色の ● だけ
-                let rx = x1.saturating_sub(4 + bw);
+                let rx = left_end - 3;
                 put_clipped(&mut frame, rx, b.y, " ● ", style(color, BG), x1);
                 left_end = rx;
             }
+            // 選んでいるペインは枠と名前の色で示す
             let mut x = b.x + 2;
-            if focused {
-                x += put_clipped(&mut frame, x, b.y, " SELECTED ", bold(BG, mode_color), left_end);
-            }
-            let program = pane.program();
-            let name = program.map_or("shell", |p| p.name.as_str());
-            x += put_clipped(&mut frame, x, b.y, &format!(" {name} "), bold(TEXT, BG), left_end);
+            let name_style = bold(if focused { mode_color } else { TEXT }, BG);
+            x += put_clipped(&mut frame, x, b.y, &format!(" {name} "), name_style, left_end);
             if let Some(p) = program {
                 let command = p.command.split_whitespace().collect::<Vec<_>>().join(" ");
                 put_clipped(&mut frame, x, b.y, &format!("{} ", truncate(&command, left_end.saturating_sub(x + 1) as usize)), style(DIM, BG), left_end);

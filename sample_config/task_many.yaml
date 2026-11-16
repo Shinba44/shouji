@@ -1,0 +1,193 @@
+# shouji のタスクファイル．ここに書いたプログラムを一度にまとめて起動する．
+# C-q Space のメニューでこのタスクを選ぶと，windows に書いたウィンドウを開き，
+# 各ウィンドウのプログラムを均等に分割したペインで起動する（4 つなら 2×2）．
+# このファイルは選ぶたびに読み込むので，編集は shouji を再起動しなくても反映される．
+#
+# 項目:
+#   name:     タスクの名前（省略可．省略時は shouji.yaml 側の名前）
+#   env:      タスク内のすべてのプログラムに付ける環境変数（省略可）
+#   pre_command: タスク内のすべてのプログラムの command の前に実行するコマンド（省略可．下の説明を参照）
+#   windows:  ウィンドウの一覧．各ウィンドウに name と programs を書く．
+#             各ウィンドウにも env と pre_command を書ける（そのウィンドウのプログラムすべてに付く）．
+#             ウィンドウに分けないなら，windows の代わりに programs だけを書いてもよい
+#             （タスク名のウィンドウ 1 つになる）．両方は書けない．
+#   programs: 起動するプログラムの一覧（プログラム名はタスク全体で重ならないようにする）
+#     name:    プログラムの名前（必須）
+#     command: $SHELL -c で実行するコマンド（必須．パイプなども書ける）
+#              注意: 値の中に「: 」（コロン＋空白）があると YAML の書式エラーになる．
+#              その場合は command: 'echo "a: b"' のように全体をクォートする．
+#     cwd:     作業ディレクトリ（省略可．~ 始まり可．相対パスはこのファイルのディレクトリから）
+#     env:     このプログラムだけに付ける環境変数（省略可）．command の中では $名前 で参照できる．
+#              値はシェルのダブルクォートの中と同じように展開される:
+#                NETWORK_IF: ${NETWORK_IF:-eth0}     設定されていなければ eth0
+#                ROS_IP: $(hostname -I | cut -d' ' -f1)   コマンドの出力
+#                PATH: $HOME/bin:$PATH               既存の値に足す
+#              $ や " をそのまま入れたいときは \$ や \" と書く．
+#              shouji.yaml → タスク → ウィンドウ → プログラム の順に，それぞれ書いた順で設定するので，
+#              後の値から前の変数を使える．同じ名前なら後（狭い領域）の値が効く．
+#              $ を使った値が空になったら，ペインに警告を出す（プログラムは起動する）．
+#     pre_command: command の前に，同じシェルで実行するコマンド（省略可）．
+#              source setup.bash のように，計算して作る環境変数（PATH に足すなど）を用意するのに使う．
+#              失敗したら command は実行せず，失敗として終わる（after: done で待つ相手は止まる）．
+#              autostart: false のシェルや，終了後に s で開くシェルでも実行される．
+#              タスク・ウィンドウ・プログラムの複数に書いてあれば，狭い領域のものが丸ごと優先される
+#              （env と違って重ねない）．pre_command: '' と書けば，そのプログラムには付けない．
+#              別のプログラムの終了を待ちたい（ビルドなど）ときは，pre_command ではなく after を使う．
+#     autostart: すぐ起動するか（省略時 true）．false なら，シェルのプロンプトにコマンドを
+#                入力した状態で待つ．Enter で実行，終わったら ↑ Enter で再実行できる．
+#     after:   起動を待つ相手（同じタスク内のプログラムの name．別のウィンドウでもよい）と条件（省略可）
+#                - build: done      build が正常終了（終了コード 0）したら
+#                - server: started  server が起動したら（- server だけでも同じ）
+#              すべてそろうまで，ペインには待っている相手の状態が表示される．
+#              相手が失敗すると [NG] と表示されて止まる．Enter（またはクリック）で今すぐ起動できる．
+#     delay:   起動前に待つ秒数（省略可．after があれば，そろってからさらに待つ）
+#
+#     例:
+#       - name: build
+#         command: cargo build
+#       - name: server
+#         command: cargo run
+#         after:
+#           - build: done
+#       - name: client
+#         command: ./client.sh
+#         after:
+#           - server
+#         delay: 2
+#
+#     restart: 終了したときに自動で再起動するか（省略可）．1 行でも入れ子でも書ける．
+#                restart: on-failure        ← 1 行で書く場合（delay は 1 秒，回数は無制限）
+#                restart:                   ← 細かく指定する場合
+#                  when: on-failure         never: しない / on-failure: エラーで終了したときだけ / always: どう終わっても
+#                  delay: 2                 再起動までの秒数（省略時 1）
+#                  max: 3                   自動で再起動する回数の上限（省略時は無制限．r で手動再起動すると数え直す）
+#              待っている間に q で取りやめ，r ですぐ再起動．C-q q で閉じたときは再起動しない．
+#     stop:    ペインを閉じるとき（C-q q）やセッションを終えるときに実行するコマンド（省略可）．
+#              実行してから，プログラムが終わるのを timeout 秒（省略時 10）まで待ち，
+#              終わらなければ強制終了する．docker compose down などの後始末に使う．
+#                stop: docker compose down     ← 1 行で書く場合
+#                stop:                         ← 細かく指定する場合
+#                  command: docker stop mydb
+#                  timeout: 5
+#              cwd・env・pre_command はプログラムと同じ．出力は log があればそこに残る．
+#              ペインを閉じずに止めたいときは，タイトルの Stop ボタンか C-q s で stop だけを実行できる
+#              （止まったペインでは，残ったコンテナの片付けなどに使える）．
+#     log:     出力を追記するログファイル（省略可．相対パスは command と同じく作業ディレクトリから:
+#              cwd があればそこから，なければ shouji を起動したディレクトリから）
+#              色などのエスケープシーケンスは取り除かれ，起動・終了のたびに日時の区切りが入る．
+#     keep_on_exit: 終了してもペインを残すか（省略時 true）．
+#                   残したペインでは r で再起動，s でシェル，q で閉じる．C-q [ で過去の出力をスクロールできる．
+
+name: sample
+
+# タスク全体の環境変数: すべてのウィンドウのすべてのプログラムに付く
+env:
+  APP_ENV: development
+  LOG_LEVEL: warn
+  # stop の例で使う: 各プログラムは自分の PID をここに書き，stop はそれを見て止める
+  PID_DIR: ${TMPDIR:-/tmp}/shouji-sample
+
+windows:
+  # ---- ウィンドウ 0: app（起動順 after / delay の例）----
+  # build が終わる（3 秒）→ server が起動 → その 2 秒後に client が起動，の順に動く．
+  # 待っている間，server と client のペインには待っている相手の状態が表示される．
+  - name: app
+    # ウィンドウの環境変数: app のプログラムすべてに付く（タスク全体の LOG_LEVEL=warn より優先）
+    env:
+      LOG_LEVEL: info
+    programs:
+      # ビルドの代わり: 3 秒かかって正常終了（終了コード 0）する
+      - name: build
+        command: echo "building..."; sleep 3; echo "build finished"
+
+      # build が正常終了するまで待ってから起動する．出力は logs/server.log にも保存する
+      # プログラムの環境変数: LOG_LEVEL=debug がウィンドウの info より優先される
+      # stop の例: PID ファイルを作り，stop（タイトルの Stop ボタン / C-q s / ペインを閉じる）で
+      # SIGTERM を送る．trap で後始末のメッセージを出してから終わる（stop の出力は log に残る）
+      - name: server
+        command: |
+          mkdir -p "$PID_DIR"; echo $$ > "$PID_DIR/server.pid"
+          trap 'echo "[server] shutting down..."; rm -f "$PID_DIR/server.pid"; exit 0' TERM
+          echo "server started (APP_ENV=$APP_ENV LOG_LEVEL=$LOG_LEVEL)"
+          while true; do echo "[server] $(date '+%H:%M:%S') ok"; sleep 2; done
+        stop: kill "$(cat "$PID_DIR/server.pid")"
+        after:
+          - build: done
+        log: logs/server.log
+        env:
+          LOG_LEVEL: debug
+
+      # server が起動してから，さらに 2 秒待って起動する
+      # stop の例（細かく指定）: SIGTERM では止まらない（trap で無視する）ので，timeout の 3 秒後に
+      # shouji が強制終了する．止まるまでの間，タイトルには Stopping と Force stop ボタンが出る
+      - name: client
+        command: |
+          mkdir -p "$PID_DIR"; echo $$ > "$PID_DIR/client.pid"
+          trap 'echo "[client] ignoring SIGTERM"' TERM
+          echo "client started (APP_ENV=$APP_ENV LOG_LEVEL=$LOG_LEVEL)"
+          while true; do echo "[client] request $(date '+%H:%M:%S')"; sleep 3; done
+        stop:
+          command: kill "$(cat "$PID_DIR/client.pid")"
+          timeout: 3
+        after:
+          - server: started
+        delay: 2
+
+      - name: top
+        command: top
+
+      - name: status
+        command: watch -n 2 git status --short
+        cwd: .
+
+      - name: clock
+        command: |
+          mkdir -p "$PID_DIR"; echo $$ > "$PID_DIR/clock.pid"
+          while true; do date '+%H:%M:%S'; sleep 1; done
+        stop: kill "$(cat "$PID_DIR/clock.pid")"
+
+      # 環境変数の例: TZ で date のタイムゾーンを変え，自分で決めた LABEL を command の中で使う
+      - name: clock-ny
+        command: |
+          mkdir -p "$PID_DIR"; echo $$ > "$PID_DIR/clock-ny.pid"
+          while true; do echo "$LABEL $(date '+%H:%M:%S %Z')"; sleep 1; done
+        stop: kill "$(cat "$PID_DIR/clock-ny.pid")"
+        env:
+          TZ: America/New_York
+          LABEL: "New York:"
+
+      # autostart: false の例: コマンドが入力された状態で待つので，Enter を押すと実行される
+      - name: git-log
+        command: git log --oneline --graph --all
+        autostart: false
+        env:
+          GIT_PAGER: cat
+
+      # 自動再起動の例: 5 秒ごとにエラーで落ちるが，2 秒後に自動で起動し直す（3 回まで）
+      - name: flaky
+        command: echo "flaky started"; sleep 5; echo "crash!"; exit 1
+        restart:
+          when: on-failure
+          delay: 2
+          max: 3
+        log: logs/flaky.log
+
+      # pre_command の例: 複数の変数をまとめて作るスクリプト（setup.bash など）を読み込むときに使う．
+      # （1 つの値なら env に  BRANCH: $(git branch --show-current)  と書いてもよい）
+      # このペインを終了して s でシェルを開いても，BRANCH が入っている
+      - name: pre-command
+        cwd: .
+        pre_command: export BRANCH="$(git branch --show-current)"
+        command: |
+          mkdir -p "$PID_DIR"; echo $$ > "$PID_DIR/pre-command.pid"
+          echo "branch is $BRANCH"; while true; do sleep 60; done
+        stop: kill "$(cat "$PID_DIR/pre-command.pid")"
+
+      # 別のウィンドウのプログラムを待つ例: app ウィンドウの client が起動したら起動する
+      - name: after-client
+        command: |
+          mkdir -p "$PID_DIR"; echo $$ > "$PID_DIR/after-client.pid"
+          echo "client が起動したので起動しました"; while true; do sleep 60; done
+        stop: kill "$(cat "$PID_DIR/after-client.pid")"
+        after:
+          - client

@@ -16,5 +16,6 @@
 
 tasks:
   - task.yaml
+  - task_many.yaml
   - ros.yaml
   - docker-test.yaml

@@ -408,6 +408,11 @@ impl Pane {
         }
     }
 
+    /// プロセスが終わっているか（終了の通知を待たずに確かめる）．
+    pub fn has_exited(&mut self) -> bool {
+        self.proc.as_mut().is_none_or(|p| !matches!(p.child.try_wait(), Ok(None)))
+    }
+
     /// 終了済みの子プロセスを回収する（ゾンビ化を防ぐ）．
     pub fn reap(&mut self) {
         if let Some(proc) = &mut self.proc {

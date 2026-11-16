@@ -216,7 +216,8 @@ impl Window {
 
 /// stop を実行して，プログラムが終わるのを待っているところ．
 struct Stopping {
-    child: std::process::Child,
+    /// stop のプロセス（終わったら `None`．そのあともプログラムが終わるのを deadline まで待つ）．
+    child: Option<std::process::Child>,
     /// この時刻を過ぎても終わらなければ強制終了する．
     deadline: Instant,
     /// 終わったらペインを閉じるか（false なら Stop ボタン: ペインは残す）．
@@ -845,7 +846,7 @@ impl App {
 
         // Stop ボタンで止めたのなら，待つのは終わり（stop のプロセスは裏で回収する）
         if !closing && let Some(st) = self.stopping.remove(&id) {
-            self.background.push(st.child);
+            self.background.extend(st.child);
         }
 
         // 自動再起動（restart）．C-q q で閉じたとき，Stop ボタンで止めたとき，autostart: false のペインは対象外
@@ -1002,7 +1003,7 @@ impl App {
             let timeout = p.program().map_or(std::time::Duration::from_secs(10), |pr| pr.stop_timeout);
             if let Some(child) = p.spawn_stop() {
                 p.set_closing();
-                self.stopping.insert(id, Stopping { child, deadline: Instant::now() + timeout, close: true });
+                self.stopping.insert(id, Stopping { child: Some(child), deadline: Instant::now() + timeout, close: true });
                 let name = p.program().map_or(String::new(), |pr| pr.name.clone());
                 self.info = Some(format!("Stopping {name}... (close it again to force it)"));
                 return;
@@ -1010,7 +1011,7 @@ impl App {
         }
         // 実際の削除は reader スレッドから Exited が届いたときに行う
         if let Some(st) = self.stopping.remove(&id) {
-            self.background.push(st.child);
+            self.background.extend(st.child);
         }
         if let Some(p) = self.panes.get_mut(&id) {
             p.kill();
@@ -1044,23 +1045,36 @@ impl App {
         if let Some(child) = p.spawn_stop() {
             p.stop_requested = true;
             self.restarts.remove(&id);
-            self.stopping.insert(id, Stopping { child, deadline: Instant::now() + program.stop_timeout, close: false });
+            self.stopping.insert(id, Stopping { child: Some(child), deadline: Instant::now() + program.stop_timeout, close: false });
             self.info = Some(format!("Stopping {}... (press Stop again to force it)", program.name));
         }
     }
 
     /// stop を実行中のペインのうち，stop が終わったか時間切れになったものを強制終了する
     /// （閉じる場合はペインも閉じる）．終わった stop のプロセスを回収する．
+    /// stop が成功して終わったあとも，プログラムが自分で終わるのを deadline まで待つ
+    /// （`kill` のようにシグナルを送ってすぐ戻る stop でも，プログラムの後始末を待てるように）．
+    /// stop が失敗したら，それ以上は待たない．
     fn poll_stops(&mut self) {
         let now = Instant::now();
-        let done: Vec<PaneId> = self
-            .stopping
-            .iter_mut()
-            .filter_map(|(id, st)| (now >= st.deadline || matches!(st.child.try_wait(), Ok(Some(_)))).then_some(*id))
-            .collect();
+        let mut done = Vec::new();
+        for (id, st) in self.stopping.iter_mut() {
+            // stop が終わっていれば Some(成功したか)
+            let finished = match st.child.as_mut().map(|c| c.try_wait()) {
+                Some(Ok(Some(status))) => Some(status.success()),
+                Some(Err(_)) => Some(false),
+                _ => None,
+            };
+            if finished.is_some() {
+                self.background.extend(st.child.take());
+            }
+            if finished == Some(false) || now >= st.deadline {
+                done.push(*id);
+            }
+        }
         for id in done {
             let Some(st) = self.stopping.remove(&id) else { continue };
-            self.background.push(st.child);
+            self.background.extend(st.child);
             match self.panes.get_mut(&id) {
                 Some(p) if p.is_dead() && st.close => self.remove_pane(id),
                 Some(p) if p.is_dead() => {}
@@ -1075,6 +1089,8 @@ impl App {
     /// セッションを終えるとき: 全ペインの stop を実行し，終わるのを（いちばん長い timeout まで）待つ．
     fn run_all_stops(&mut self) {
         let mut deadline = Instant::now();
+        // stop を実行したペイン: (ペイン, stop のプロセス, 待つ期限)
+        let mut pending: Vec<(PaneId, Option<std::process::Child>, Instant)> = Vec::new();
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
         for id in ids {
             if self.stopping.contains_key(&id) || self.waits.contains_key(&id) || !self.runs.get(&id).is_some_and(|r| r.started) {
@@ -1083,23 +1099,39 @@ impl App {
             let Some(p) = self.panes.get_mut(&id) else { continue };
             let timeout = p.program().map_or(std::time::Duration::ZERO, |pr| pr.stop_timeout);
             if let Some(child) = p.spawn_stop() {
-                deadline = deadline.max(Instant::now() + timeout);
-                self.background.push(child);
+                pending.push((id, Some(child), Instant::now() + timeout));
             }
         }
-        for (_, st) in self.stopping.drain() {
-            deadline = deadline.max(st.deadline);
-            self.background.push(st.child);
+        for (id, st) in self.stopping.drain() {
+            pending.push((id, st.child, st.deadline));
         }
-        while !self.background.is_empty() && Instant::now() < deadline {
+        for (_, _, d) in &pending {
+            deadline = deadline.max(*d);
+        }
+        // stop が終わり，プログラムも終わるまで（stop が失敗したら，そのペインは待たない）
+        loop {
+            let now = Instant::now();
+            let panes = &mut self.panes;
+            pending.retain_mut(|(id, child, d)| {
+                match child.as_mut().map(|c| c.try_wait()) {
+                    Some(Ok(Some(status))) if !status.success() => return false,
+                    Some(Ok(Some(_)) | Err(_)) => *child = None,
+                    _ => {}
+                }
+                let exited = panes.get_mut(id).is_none_or(|p| p.has_exited());
+                (child.is_some() || !exited) && now < *d
+            });
             self.background.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_)) | Err(_)));
+            if (pending.is_empty() && self.background.is_empty()) || now >= deadline {
+                break;
+            }
             thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
     fn remove_pane(&mut self, id: PaneId) {
         if let Some(st) = self.stopping.remove(&id) {
-            self.background.push(st.child);
+            self.background.extend(st.child);
         }
         self.waits.remove(&id);
         self.restarts.remove(&id);

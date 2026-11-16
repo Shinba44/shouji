@@ -58,13 +58,14 @@ fn keys(bytes: &[u8]) -> Vec<Key> {
             [b, ..] => (
                 1,
                 Some(match b {
-                    b'k' | 0x10 => Key::Up,   // k / C-p
-                    b'j' | 0x0e => Key::Down, // j / C-n
-                    b'h' | 0x7f | 0x08 => Key::Left,
-                    b'l' | b'\t' => Key::Right,
+                    // 文字キーはタスクのショートカット（1-9, a-z）に使うので，移動は矢印キーで行う
+                    0x10 => Key::Up,   // C-p
+                    0x0e => Key::Down, // C-n
+                    0x7f | 0x08 => Key::Left,
+                    b'\t' => Key::Right,
                     b'\r' | b'\n' => Key::Enter,
                     b' ' => Key::Space,
-                    b'q' | 0x1b | 0x11 => Key::Cancel, // q / Esc / C-q
+                    0x1b | 0x11 => Key::Cancel, // Esc / C-q
                     b => Key::Char(*b as char),
                 }),
             ),
@@ -190,6 +191,24 @@ impl Geometry {
     }
 }
 
+/// タスクの一覧で `i` 番目を起動するキー（1-9 の次は a-z）．
+fn shortcut(i: usize) -> Option<char> {
+    match i {
+        0..9 => Some((b'1' + i as u8) as char),
+        9..35 => Some((b'a' + (i - 9) as u8) as char),
+        _ => None,
+    }
+}
+
+/// キーが何番目のタスクのショートカットか．
+fn shortcut_index(c: char) -> Option<usize> {
+    match c {
+        '1'..='9' => Some(c as usize - '1' as usize),
+        'a'..='z' => Some(c as usize - 'a' as usize + 9),
+        _ => None,
+    }
+}
+
 /// タスクの一覧の行に付ける，選択画面を開くボタン．
 const SELECT_LABEL: &str = "[select]";
 
@@ -245,7 +264,10 @@ impl Launcher {
                     Key::Enter => MenuResult::Launch(self.selected),
                     Key::Right => MenuResult::OpenSelect(self.selected),
                     Key::Cancel => MenuResult::Cancel,
-                    Key::Char(c @ '1'..='9') if (c as usize - '1' as usize) < len => MenuResult::Launch(c as usize - '1' as usize),
+                    Key::Char(c) => match shortcut_index(c) {
+                        Some(i) if i < len => MenuResult::Launch(i),
+                        _ => MenuResult::Stay,
+                    },
                     _ => MenuResult::Stay,
                 },
             };
@@ -273,17 +295,20 @@ impl Launcher {
                 lines: if tasks.is_empty() {
                     vec!["(no tasks: write tasks: in shouji.yaml)".into()]
                 } else {
+                    // 名前の列は一番長い名前にそろえる
+                    let name_w = tasks.iter().map(|t| t.name.width()).max().unwrap_or(0).max(12);
                     tasks
                         .iter()
                         .enumerate()
                         .map(|(i, t)| {
-                            let key = if i < 9 { format!("{}", i + 1) } else { " ".into() };
-                            format!(" {key}  {:<12} {SELECT_LABEL}  {}", t.name, t.path.display())
+                            let key = shortcut(i).unwrap_or(' ');
+                            let pad = " ".repeat(name_w - t.name.width());
+                            format!(" {key}  {}{pad} {SELECT_LABEL}  {}", t.name, t.path.display())
                         })
                         .collect()
                 },
                 cursor: (!tasks.is_empty()).then_some(self.selected),
-                buttons: vec![("Enter: launch all", Button::Hint), ("->: select", Button::Hint), ("q: cancel", Button::Hint)],
+                buttons: vec![("Enter: launch all", Button::Hint), ("->: select", Button::Hint), ("Esc: cancel", Button::Hint)],
             },
         }
     }
@@ -453,7 +478,7 @@ mod tests {
     #[test]
     fn navigate_and_launch() {
         let mut l = Launcher::default();
-        assert!(matches!(l.feed(b"j", 3), MenuResult::Stay));
+        assert!(matches!(l.feed(b"\x1b[B", 3), MenuResult::Stay));
         assert!(matches!(l.feed(b"\x1b[B", 3), MenuResult::Stay));
         assert_eq!(l.selected, 2);
         assert!(matches!(l.feed(b"\x1b[B", 3), MenuResult::Stay));
@@ -503,15 +528,27 @@ mod tests {
     }
 
     #[test]
+    fn letter_shortcuts() {
+        assert_eq!((shortcut(0), shortcut(8), shortcut(9), shortcut(34), shortcut(35)), (Some('1'), Some('9'), Some('a'), Some('z'), None));
+        let mut l = Launcher::default();
+        // 10 番目は a，15 番目は f．数より後の文字や，以前の移動キーは何もしない
+        assert!(matches!(l.feed(b"a", 15), MenuResult::Launch(9)));
+        assert!(matches!(l.feed(b"f", 15), MenuResult::Launch(14)));
+        assert!(matches!(l.feed(b"g", 15), MenuResult::Stay));
+        assert!(matches!(l.feed(b"q", 3), MenuResult::Stay));
+        assert!(matches!(l.feed(b"k", 30), MenuResult::Launch(19)));
+    }
+
+    #[test]
     fn select_screen() {
         let mut l = Launcher { selected: 0, select: Some(Selection::new(sample_task())) };
         // 行: 0 app, 1 build, 2 server, 3 mon, 4 top
         assert_eq!(l.select.as_ref().unwrap().lines()[0], " [x] app");
         // server を外すと app は一部だけ選ばれた状態
-        l.feed(b"jj ", 1);
+        l.feed(b"\x1b[B\x1b[B ", 1);
         assert_eq!(l.select.as_ref().unwrap().lines()[0], " [-] app");
         // mon（ウィンドウ）を外すと中の top も外れる
-        l.feed(b"j ", 1);
+        l.feed(b"\x1b[B ", 1);
         assert_eq!(l.select.as_ref().unwrap().lines()[4], "     [ ] top          run top");
         assert_eq!(launched(l.feed(b"\r", 1)), vec![("app".to_string(), vec![0])]);
 
