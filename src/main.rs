@@ -669,7 +669,7 @@ impl App {
                     self.message = Some(format!("cannot start a shell: {e}"));
                 }
             }
-            b'q' | b'x' => self.remove_pane(id),
+            b'q' => self.remove_pane(id),
             _ => {}
         }
     }
@@ -680,7 +680,7 @@ impl App {
             Action::Forward(bytes) => {
                 let active = self.win().active;
                 if self.waits.contains_key(&active) {
-                    if let Some(&key) = bytes.iter().find(|b| b"\r\nqx".contains(b)) {
+                    if let Some(&key) = bytes.iter().find(|b| b"\r\nq".contains(b)) {
                         self.waiting_key(active, key);
                     }
                     return;
@@ -688,7 +688,7 @@ impl App {
                 let Some(p) = self.panes.get_mut(&active) else { return };
                 if !p.is_dead() {
                     p.write(&bytes);
-                } else if let Some(&key) = bytes.iter().find(|b| b"rsqx".contains(b)) {
+                } else if let Some(&key) = bytes.iter().find(|b| b"rsq".contains(b)) {
                     self.dead_pane_key(active, key);
                 }
             }
@@ -786,7 +786,7 @@ impl App {
             self.runs.entry(id).or_default().exit = Some(exit.success);
         }
 
-        // 自動再起動（restart）．C-q x で閉じたときと autostart: false のペインは対象外
+        // 自動再起動（restart）．C-q q で閉じたときと autostart: false のペインは対象外
         let wants_restart = exit.was_program
             && !closing
             && program.as_ref().is_some_and(|p| {
@@ -889,7 +889,7 @@ impl App {
     fn waiting_key(&mut self, id: PaneId, key: u8) {
         match key {
             b'\r' | b'\n' => self.start_waiting(id),
-            b'q' | b'x' => self.remove_pane(id),
+            b'q' => self.remove_pane(id),
             _ => {}
         }
     }

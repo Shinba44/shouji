@@ -316,7 +316,7 @@ impl Pane {
         self.parser.lock().unwrap().process(msg.as_bytes());
     }
 
-    /// `C-q x` で閉じようとしているか（このときは自動再起動しない）．
+    /// `C-q q` で閉じようとしているか（このときは自動再起動しない）．
     pub fn is_closing(&self) -> bool {
         self.closing
     }

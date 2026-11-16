@@ -8,7 +8,7 @@
 //! │   ├ build  ● │ ╰───────────────────────────────────────────────────────╯
 //! │ ● running    │
 //!  What you type goes to "build". Click another pane to switch.
-//!  C-q z Zoom  C-q x Close pane  C-q [ Scroll back  C-q t Hide layout  C-q ? Help  C-q d Quit
+//!  C-q z Zoom  C-q q Close pane  C-q [ Scroll back  C-q t Hide layout  C-q ? Help  C-q d Quit
 //! ```
 //!
 //! 描画とクリック判定は同じ部品の一覧（[`Part`]）から行う．
@@ -344,11 +344,6 @@ impl App {
         let rows = self.footer_rows();
         let mut parts = Vec::new();
         let name = self.active_name();
-        let active = self.win().active;
-        let pane = self.panes.get(&active);
-        let waiting = self.waits.contains_key(&active);
-        let dead = !waiting && pane.is_some_and(Pane::is_dead);
-        let failed = dead && pane.and_then(|p| p.last_exit.as_ref()).is_none_or(|e| !e.0);
 
         // 1 行目: いまの状態の説明（エラーやお知らせがあればそちら）
         if rows == 2 {
@@ -363,10 +358,6 @@ impl App {
                 (info.clone(), BLUE)
             } else if self.scrolling {
                 (format!("Reading past output of \"{name}\". New output keeps arriving below."), MUTED)
-            } else if waiting {
-                (format!("\"{name}\" is waiting to start. Press Enter or click Start now to start it now."), MUTED)
-            } else if dead {
-                (format!("\"{name}\" has stopped. Press r or click Run again to run it again."), MUTED)
             } else {
                 (format!("What you type goes to \"{name}\". Click another pane to switch."), MUTED)
             };
@@ -385,15 +376,10 @@ impl App {
             ]
         } else {
             let zoom = self.win().zoom;
+            // 止まった・待機中のペインの操作（Run again など）は，そのペインの中にだけ出す
             let mut v = Vec::new();
-            if waiting {
-                v.push(hint("Enter", "Start now", Some(b"\r")));
-            } else if dead {
-                v.push(Hint { hot: failed, ..hint("r", "Run again", Some(b"r")) });
-                v.push(hint("s", "Shell", Some(b"s")));
-            }
             v.push(hint("C-q z", if zoom { "Unzoom" } else { "Zoom" }, Some(b"\x11z")));
-            v.push(hint("C-q x", "Close pane", Some(b"\x11x")));
+            v.push(hint("C-q q", "Close pane", Some(b"\x11q")));
             v.push(hint("C-q [", "Scroll back", Some(b"\x11[")));
             v.push(hint("C-q t", if self.sidebar { "Hide layout" } else { "Show layout" }, Some(b"\x11t")));
             v.push(hint("C-q ?", "Help", Some(b"\x11?")));
@@ -432,7 +418,7 @@ impl App {
             if y < r.y + r.h {
                 let mut row = Row::new(r.x + 1, y, end);
                 row.hint("Enter", "Start now", false, Some(Click::PaneKey(id, b'\r')), PANEL);
-                row.hint("x", "Close", false, Some(Click::PaneKey(id, b'x')), PANEL);
+                row.hint("q", "Close", false, Some(Click::PaneKey(id, b'q')), PANEL);
                 parts.extend(row.parts);
             }
             return parts;
@@ -447,7 +433,7 @@ impl App {
             let k = |c| Some(Click::PaneKey(id, c));
             row.hint("r", if long { "Run again" } else { "Run" }, hot, k(b'r'), bg);
             row.hint("s", "Shell", false, k(b's'), bg);
-            row.hint("x", "Close", false, k(b'x'), bg);
+            row.hint("q", "Close", false, k(b'q'), bg);
         };
         let fill = |parts: &mut Vec<Part>, y: u16, bg: Color| parts.push(Part::new(r.x, y, " ".repeat(r.w as usize), style(TEXT, bg), end));
 

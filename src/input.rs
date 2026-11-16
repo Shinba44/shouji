@@ -75,7 +75,7 @@ impl InputParser {
                     b'%' => actions.push(Action::Split(Dir::Horizontal)),
                     b'"' => actions.push(Action::Split(Dir::Vertical)),
                     b'o' => actions.push(Action::FocusNext),
-                    b'x' => actions.push(Action::Kill),
+                    b'q' => actions.push(Action::Kill),
                     b'd' => actions.push(Action::Quit),
                     b'c' => actions.push(Action::NewWindow),
                     b'[' => actions.push(Action::ScrollMode),

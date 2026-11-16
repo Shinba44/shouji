@@ -20,7 +20,7 @@ const GROUPS: &[Group] = &[
             ("C-q arrows", "Pane on that side (hjkl too)"),
             ("C-q z", "Zoom in / back to normal"),
             ("C-q % / C-q \"", "Split left-right / top-bottom"),
-            ("C-q x", "Close the pane"),
+            ("C-q q", "Close the pane"),
         ],
     },
     Group {
@@ -37,7 +37,7 @@ const GROUPS: &[Group] = &[
         items: &[
             ("r", "Run a stopped program again"),
             ("s", "Open a shell in its directory"),
-            ("x", "Close the pane"),
+            ("q", "Close the pane"),
             ("Enter", "Start a waiting program now"),
         ],
     },
