@@ -57,6 +57,7 @@ windows:
         after: [{ build: done }]     # wait until build exits successfully (or: started)
         restart: on-failure          # or { when, delay, max }
         log: logs/server.log         # relative to cwd (or where shouji was started)
+        stop: docker compose down    # run when the pane is closed or the session ends (or with the Stop button / C-q s)
   - name: tools
     programs:
       - name: git-log
@@ -91,6 +92,7 @@ start with `Ctrl-q`: press `Ctrl-q`, let go, then press the key.
 | `C-q z` | Zoom the pane in / out |
 | `C-q %` / `C-q "` | Split left/right, top/bottom |
 | `C-q q` | Close the pane |
+| `C-q s` | Run the program's `stop` command without closing the pane (also the `Stop` button) |
 | `C-q c` / `C-q n` / `C-q p` / `C-q 1-9` | New window / switch windows (or click a tab) |
 | `C-q [` | Scroll back (`k/j u/d g/G`, `q` to stop; the mouse wheel works too) |
 | `C-q t` | Show / hide the layout panel |

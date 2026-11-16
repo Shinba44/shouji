@@ -194,7 +194,9 @@ impl App {
 
     /// ペインの状態の名前と色．
     pub fn pane_status(&self, id: PaneId, pane: &Pane) -> (&'static str, Color) {
-        if self.waits.contains_key(&id) {
+        if self.stopping.contains_key(&id) {
+            ("Stopping", AMBER)
+        } else if self.waits.contains_key(&id) {
             ("Waiting", AMBER)
         } else if self.restarts.contains_key(&id) {
             ("Restarting", AMBER)
@@ -216,6 +218,37 @@ impl App {
         self.panes.get(&id).and_then(Pane::program).map_or("shell".into(), |p| p.name.clone())
     }
 
+    /// タイトルの右側: PID と，状態（● Running など）とその色．
+    fn title_right(&self, id: PaneId, pane: &Pane) -> (String, String, Color) {
+        let (label, color) = self.pane_status(id, pane);
+        let pid = match pane.pids() {
+            Some((pid, Some(fg))) if fg != pid => format!(" pid {pid} fg {fg} "),
+            Some((pid, _)) => format!(" pid {pid} "),
+            None => String::new(),
+        };
+        (pid, format!(" ● {label} "), color)
+    }
+
+    /// 動いているプログラムに stop があれば，タイトルの右端（pid・状態の右）に出す Stop ボタン．`b` は枠．
+    fn stop_button(&self, id: PaneId, b: Rect) -> Option<Part> {
+        let pane = self.panes.get(&id)?;
+        pane.program()?.stop.as_ref()?;
+        if pane.is_dead() || self.waits.contains_key(&id) || b.h < 3 {
+            return None;
+        }
+        let (right, status, _) = self.title_right(id, pane);
+        let rw = (right.width() + status.width()) as u16;
+        let text = if self.stopping.contains_key(&id) { " Force stop " } else { " Stop " };
+        let bw = text.width() as u16;
+        let x1 = b.x + b.w - 1;
+        // 名前の分（20 文字ほど）を残せないほど狭ければ出さない
+        if b.w < rw + bw + 24 {
+            return None;
+        }
+        let x = x1 - 1 - bw;
+        Some(Part::new(x, b.y, text, bold(TEXT, BUTTON), x1).click(Click::Stop(id)))
+    }
+
     /// クリックした位置の部品．
     pub fn click_at(&self, x: u16, y: u16) -> Option<Click> {
         self.chrome().into_iter().find(|p| p.click.is_some() && p.contains(x, y)).and_then(|p| p.click)
@@ -229,6 +262,9 @@ impl App {
         let win = self.win();
         for (id, r) in &win.rects {
             parts.extend(self.overlay(*id, *r));
+        }
+        for (id, b) in &win.boxes {
+            parts.extend(self.stop_button(*id, *b));
         }
         parts
     }
@@ -432,11 +468,16 @@ impl App {
         }
         let restarting = self.restarts.contains_key(&id);
         let (ok, what) = pane.last_exit.clone().unwrap_or((false, "status unknown".into()));
+        let has_stop = pane.program().is_some_and(|p| p.stop.is_some());
         let buttons = |row: &mut Row, bg: Color, long: bool| {
             let hot = !ok;
             let k = |c| Some(Click::PaneKey(id, c));
             row.hint("r", if long { "Run again" } else { "Run" }, hot, k(b'r'), bg);
             row.hint("s", "Shell", false, k(b's'), bg);
+            if has_stop {
+                // 止まった後の後始末（残ったコンテナを消すなど）
+                row.hint("C-q s", "Stop", false, Some(Click::Stop(id)), bg);
+            }
             row.hint("q", "Close", false, k(b'q'), bg);
         };
         let fill = |parts: &mut Vec<Part>, y: u16, bg: Color| parts.push(Part::new(r.x, y, " ".repeat(r.w as usize), style(TEXT, bg), end));
@@ -566,25 +607,19 @@ impl App {
             frame.set(x1, y1, "╯", border);
 
             // タイトル: 右側に PID と状態，左側に名前とコマンド
-            let (label, color) = self.pane_status(*id, pane);
-            let mut right = String::new();
-            if let Some((pid, fg)) = pane.pids() {
-                right.push_str(&match fg {
-                    Some(fg) if fg != pid => format!(" pid {pid} fg {fg} "),
-                    _ => format!(" pid {pid} "),
-                });
-            }
-            let status = format!(" ● {label} ");
+            let (right, status, color) = self.title_right(*id, pane);
             let rw = (right.width() + status.width()) as u16;
-            let mut left_end = x1.saturating_sub(1);
-            if b.w > rw + 16 {
-                let rx = x1 - 1 - rw;
+            // 右端の Stop ボタン（chrome で描く）とすき間 1 文字の分
+            let bw = self.stop_button(*id, *b).map_or(0, |p| p.width() + 1);
+            let mut left_end = x1.saturating_sub(1 + bw);
+            if b.w > rw + bw + 16 {
+                let rx = x1 - 1 - bw - rw;
                 let used = put_clipped(&mut frame, rx, b.y, &right, style(FAINT, BG), x1);
                 put_clipped(&mut frame, rx + used, b.y, &status, style(color, BG), x1);
                 left_end = rx;
             } else if b.w > 12 {
                 // 狭いときは状態の色の ● だけ
-                let rx = x1 - 4;
+                let rx = x1.saturating_sub(4 + bw);
                 put_clipped(&mut frame, rx, b.y, " ● ", style(color, BG), x1);
                 left_end = rx;
             }

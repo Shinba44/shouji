@@ -36,6 +36,8 @@ pub enum Action {
     Zoom,
     /// 構成のサイドバーの表示を切り替える．
     ToggleSidebar,
+    /// 選択中のプログラムの stop を実行する（ペインは閉じない）．
+    Stop,
 }
 
 #[derive(Default)]
@@ -82,6 +84,7 @@ impl InputParser {
                     b'm' => actions.push(Action::ToggleMouse),
                     b'?' => actions.push(Action::Help),
                     b'z' => actions.push(Action::Zoom),
+                    b's' => actions.push(Action::Stop),
                     b't' => actions.push(Action::ToggleSidebar),
                     b'\t' => actions.push(Action::FocusNext),
                     // Space．Ctrl を押したままの C-Space（NUL）も受け付ける

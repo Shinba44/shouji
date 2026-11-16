@@ -1,0 +1,64 @@
+# docker のコンテナを shouji から止められるかを試すタスク．
+#   cargo run -- -t sample_config/docker-test.yaml
+#
+# 起動したら，コンテナのペインを閉じる（C-q q）か，セッションごと止める
+# （C-q d → y，または shouji kill docker-test）．
+# そのあと check ウィンドウの status（または docker ps）で，どのコンテナが残ったかを見る．
+# 残ったコンテナは cleanup（Enter で実行）で消せる．
+#
+# shouji がペインを閉じるときは:
+#   1. stop があれば，それを実行し，プログラムが終わるのを stop の timeout（既定 10 秒）まで待つ
+#      （その間ペインには Stopping と出る．もう一度閉じるとすぐ強制終了する）
+#   2. まだ動いていれば，ペインのプロセスに SIGHUP を送り，0.2 秒後に SIGKILL を送る
+# stop がないと，docker コマンド（クライアント）だけが止まり，コンテナは残ることが多い．
+#
+# 試す起動のしかた（イメージは手元の ubuntu:24.04 を使う）:
+#   no-stop   stop なしの docker run（比べる用．コンテナが残る）
+#   run       docker run ＋ stop: docker stop
+#   run-tty   docker run -t ＋ 入れ子の stop（timeout を短く）
+#   run-init  docker run --init（stop なしでも，init が SIGHUP を中へ渡すので止まる）
+#   compose   docker compose up ＋ stop: docker compose down
+
+name: docker-test
+env:
+  IMAGE: ubuntu:24.04
+
+windows:
+  - name: containers
+    programs:
+      # - name: no-stop
+      #   command: docker run --rm --name shouji-test-nostop $IMAGE bash -c 'while true; do echo "[no-stop] $(date +%T)"; sleep 1; done'
+
+      - name: run
+        command: docker run --rm --name shouji-test-run $IMAGE bash -c 'while true; do echo "[run] $(date +%T)"; sleep 1; done'
+        # -t 2: 2 秒待っても止まらなければ docker が強制終了する（bash は PID 1 なので SIGTERM を無視する）
+        stop: docker stop -t 2 shouji-test-run
+
+      - name: run-tty
+        command: docker run --rm -t --name shouji-test-tty $IMAGE bash -c 'while true; do echo "[tty] $(date +%T)"; sleep 1; done'
+        stop:
+          command: docker rm -f shouji-test-tty
+          timeout: 5            # 5 秒たってもプログラムが終わらなければ強制終了する
+
+      # - name: run-init
+      #   command: docker run --rm --init --name shouji-test-init $IMAGE bash -c 'while true; do echo "[init] $(date +%T)"; sleep 1; done'
+
+  # - name: compose
+  #   programs:
+  #     - name: compose
+  #       cwd: docker
+  #       command: docker compose up
+  #       stop: docker compose down
+  #       log: logs/compose.log   # stop の出力もここに残る
+
+  # - name: check
+  #   programs:
+  #     # shouji-test で始まるコンテナの一覧（1 秒ごと）
+  #     - name: status
+  #       command: watch -n 1 "docker ps -a --filter name=shouji-test --format 'table {{.Names}}\t{{.Status}}'"
+
+  #     # 残ったコンテナを消す（Enter で実行）
+  #     - name: cleanup
+  #       cwd: docker
+  #       command: docker rm -f shouji-test-nostop shouji-test-run shouji-test-tty shouji-test-init; docker compose down
+  #       autostart: false

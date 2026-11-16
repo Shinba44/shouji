@@ -147,9 +147,10 @@ pub fn info(name: &str) -> Result<String> {
     let Some(mut s) = connect(name)? else { bail!("no session named {name}") };
     write_frame(&mut s, INFO, &[])?;
     s.set_read_timeout(Some(Duration::from_secs(2)))?;
-    match read_frame(&mut s)? {
-        Some((INFO_REPLY, text)) => Ok(String::from_utf8_lossy(&text).into_owned()),
-        _ => Ok("(no answer)".into()),
+    // 終了処理（stop の実行）の途中などで返事がなければ busy
+    match read_frame(&mut s) {
+        Ok(Some((INFO_REPLY, text))) => Ok(String::from_utf8_lossy(&text).into_owned()),
+        _ => Ok("(busy: maybe stopping)".into()),
     }
 }
 

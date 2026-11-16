@@ -1,0 +1,8 @@
+# docker-test.yaml の compose ウィンドウで使う compose ファイル．
+name: shouji-test
+services:
+  ticker:
+    image: ubuntu:24.04
+    pull_policy: never        # 手元のイメージだけを使う（ダウンロードしない）
+    # SIGTERM を受けたら一言出して終わる（止め方が届いたか分かるように）
+    command: bash -c 'trap "echo got SIGTERM; exit 0" TERM; while true; do echo "[ticker] $(date +%T)"; sleep 1; done'

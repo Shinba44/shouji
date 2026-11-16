@@ -194,6 +194,22 @@ struct RawProgram {
     delay: Option<f64>,
     restart: Option<RawRestart>,
     log: Option<String>,
+    stop: Option<RawStop>,
+}
+
+/// `stop: docker compose down` か，入れ子の `stop: { command, timeout }`．
+#[derive(Debug, Deserialize)]
+#[serde(untagged, expecting = "stop must be a command, or an entry with command and (optional) timeout")]
+enum RawStop {
+    Command(String),
+    Full(RawStopFull),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawStopFull {
+    command: String,
+    timeout: Option<f64>,
 }
 
 /// `restart: on-failure` か，入れ子の `restart: { when, delay, max }`．
@@ -291,6 +307,10 @@ pub struct Program {
     pub restart_delay: Duration,
     /// 自動で再起動する回数の上限（`None` は無制限）．
     pub max_restarts: Option<u32>,
+    /// ペインを閉じるときやセッションを終えるときに実行するコマンド（`docker compose down` など）．
+    /// 実行してからプログラムが終わるのを `stop_timeout` まで待ち，終わらなければ強制終了する．
+    pub stop: Option<String>,
+    pub stop_timeout: Duration,
     /// 出力を追記するログファイル．相対パスは作業ディレクトリ（cwd，なければ shouji を起動した
     /// ディレクトリ）から解決する．
     pub log: Option<PathBuf>,
@@ -391,6 +411,12 @@ impl Task {
                 Some(RawRestart::Full(f)) => (f.when, f.delay, f.max),
             };
             let restart_delay = secs("restart.delay", restart_delay, 1.0)?;
+            let (stop, stop_timeout) = match &p.stop {
+                None => (None, None),
+                Some(RawStop::Command(c)) => (Some(c.clone()), None),
+                Some(RawStop::Full(f)) => (Some(f.command.clone()), f.timeout),
+            };
+            let stop_timeout = secs("stop.timeout", stop_timeout, 10.0)?;
             // log の相対パスは command と同じく作業ディレクトリから
             let cwd = p.cwd.as_ref().map(|c| resolve(c, base));
             let log_base = cwd.clone().or_else(|| std::env::current_dir().ok()).unwrap_or_default();
@@ -407,6 +433,8 @@ impl Task {
                 restart,
                 restart_delay,
                 max_restarts,
+                stop: stop.filter(|c| !c.trim().is_empty()),
+                stop_timeout,
                 log: p.log.as_ref().map(|l| resolve(l, &log_base)),
             });
         }
@@ -581,6 +609,21 @@ mod tests {
         // programs だけのタスクでも，タスク全体の env が効く
         let t = task("env: {A: task}\nprograms:\n  - name: p\n    command: x\n    env: {B: prog}\n").unwrap();
         assert_eq!(t.programs[0].env.len(), 2);
+    }
+
+    #[test]
+    fn parse_stop() {
+        let t = task(
+            "programs:\n  - name: a\n    command: x\n  - name: b\n    command: y\n    stop: docker compose down\n  - name: c\n    command: z\n    stop:\n      command: docker stop c\n      timeout: 3\n",
+        )
+        .unwrap();
+        let st = |i: usize| (t.programs[i].stop.as_deref(), t.programs[i].stop_timeout);
+        assert_eq!(st(0), (None, Duration::from_secs(10)));
+        assert_eq!(st(1), (Some("docker compose down"), Duration::from_secs(10)));
+        assert_eq!(st(2), (Some("docker stop c"), Duration::from_secs(3)));
+        let e = |y: &str| format!("{:#}", task(y).unwrap_err());
+        assert!(e("programs:\n  - name: a\n    command: x\n    stop:\n      cmd: y\n").contains("stop must be"));
+        assert!(e("programs:\n  - name: a\n    command: x\n    stop:\n      command: y\n      timeout: -1\n").contains("stop.timeout must be"));
     }
 
     #[test]

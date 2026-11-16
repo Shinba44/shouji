@@ -479,6 +479,8 @@ mod tests {
             restart: Default::default(),
             restart_delay: Duration::from_secs(1),
             max_restarts: None,
+            stop: None,
+            stop_timeout: Duration::from_secs(10),
             log: None,
         }
     }

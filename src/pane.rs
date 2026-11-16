@@ -90,6 +90,8 @@ pub struct Pane {
     pub warning: Option<String>,
     /// 最後に終了したプロセスの終わり方（正常終了か，"code 1" などの説明）．
     pub last_exit: Option<(bool, String)>,
+    /// Stop ボタン（C-q s）で止めようとしている（終了しても自動再起動しない）．
+    pub stop_requested: bool,
 }
 
 /// スクロールバックとして保持する行数．
@@ -132,6 +134,7 @@ impl Pane {
             log,
             warning,
             last_exit: None,
+            stop_requested: false,
         }
     }
 
@@ -182,6 +185,7 @@ impl Pane {
         let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer()?));
         let mut reader = pair.master.try_clone_reader()?;
         self.generation += 1;
+        self.stop_requested = false;
         let generation = self.generation;
         let got_output = Arc::new(AtomicBool::new(false));
 
@@ -361,6 +365,47 @@ impl Pane {
         self.closing = true;
         if let Some(proc) = &mut self.proc {
             let _ = proc.child.kill();
+        }
+    }
+
+    /// プロセスを止める（ペインは閉じない）．SIGHUP を送り，終わらなければ SIGKILL．
+    pub fn terminate(&mut self) {
+        if let Some(proc) = &mut self.proc {
+            let _ = proc.child.kill();
+        }
+    }
+
+    /// 閉じようとしている印を付ける（終了しても残さず，自動再起動もしない）．
+    pub fn set_closing(&mut self) {
+        self.closing = true;
+    }
+
+    /// task.yaml の `stop` を，プログラムと同じ cwd・env（と pre_command）で裏で実行する．
+    /// 出力はログファイルがあればそこへ追記する．`stop` がなければ `None`．
+    pub fn spawn_stop(&mut self) -> Option<std::process::Child> {
+        let p = self.program.as_ref()?;
+        let stop = p.stop.as_ref()?;
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let mut cmd = std::process::Command::new(shell);
+        cmd.arg("-c").arg(program_script(p.pre_command.as_deref(), stop));
+        cmd.envs(&p.env).env("SHOUJI", "1").stdin(std::process::Stdio::null());
+        if let Some(cwd) = p.cwd.clone().or_else(|| std::env::current_dir().ok()) {
+            cmd.current_dir(cwd);
+        }
+        let out = p.log.as_ref().and_then(|path| std::fs::OpenOptions::new().create(true).append(true).open(path).ok());
+        if let (Some(log), Some(_)) = (&self.log, &out) {
+            log.lock().unwrap().marker(&format!("stop: {stop}"));
+        }
+        match out.as_ref().and_then(|f| Some((f.try_clone().ok()?, f.try_clone().ok()?))) {
+            Some((o, e)) => cmd.stdout(o).stderr(e),
+            None => cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()),
+        };
+        match cmd.spawn() {
+            Ok(child) => Some(child),
+            Err(e) => {
+                self.warning = Some(format!("cannot run stop for {}: {e}", p.name));
+                None
+            }
         }
     }
 

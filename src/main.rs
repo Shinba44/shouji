@@ -214,6 +214,15 @@ impl Window {
     }
 }
 
+/// stop を実行して，プログラムが終わるのを待っているところ．
+struct Stopping {
+    child: std::process::Child,
+    /// この時刻を過ぎても終わらなければ強制終了する．
+    deadline: Instant,
+    /// 終わったらペインを閉じるか（false なら Stop ボタン: ペインは残す）．
+    close: bool,
+}
+
 /// 画面のクリックできる部分．
 #[derive(Clone, Copy, Debug)]
 enum Click {
@@ -222,6 +231,8 @@ enum Click {
     Pane(usize, PaneId),
     /// ペインの中のボタン（ペイン, 押したことにするキー）．
     PaneKey(PaneId, u8),
+    /// Stop ボタン（stop を実行する）．
+    Stop(PaneId),
     /// 下部のヒント（押したことにするキー入力）．
     Keys(&'static [u8]),
     Split(Dir),
@@ -267,6 +278,10 @@ struct App {
     restarts: HashMap<PaneId, Instant>,
     /// 各ペインで自動再起動した回数（max_restarts の判定に使う）．
     restart_counts: HashMap<PaneId, u32>,
+    /// `stop` を実行して，プログラムが終わるのを待っているペイン．
+    stopping: HashMap<PaneId, Stopping>,
+    /// ペインを閉じた後も動いている stop のプロセス（終わったら回収する）．
+    background: Vec<std::process::Child>,
     mouse_input: mouse::Extractor,
     tx: Sender<Event>,
     quit: bool,
@@ -299,6 +314,8 @@ impl App {
             runs: HashMap::new(),
             restarts: HashMap::new(),
             restart_counts: HashMap::new(),
+            stopping: HashMap::new(),
+            background: Vec::new(),
             scrolling: false,
             tx,
             quit: false,
@@ -668,6 +685,10 @@ impl App {
                 }
             }
             Click::Keys(keys) => self.on_keys(keys),
+            Click::Stop(id) => {
+                self.focus_pane(id);
+                self.stop_pane(id);
+            }
             Click::Split(dir) => {
                 self.stop_scrolling();
                 self.split(dir);
@@ -705,7 +726,7 @@ impl App {
                     self.message = Some(format!("cannot start a shell: {e}"));
                 }
             }
-            b'q' => self.remove_pane(id),
+            b'q' => self.close_pane(id),
             _ => {}
         }
     }
@@ -745,18 +766,17 @@ impl App {
                 win.zoom = !win.zoom;
                 self.relayout_current();
             }
+            Action::Stop => {
+                let active = self.win().active;
+                self.stop_pane(active);
+            }
             Action::ToggleSidebar => {
                 self.sidebar = !self.sidebar;
                 self.relayout_all();
             }
             Action::Kill => {
                 let active = self.win().active;
-                match self.panes.get_mut(&active) {
-                    Some(p) if p.is_dead() => self.remove_pane(active),
-                    // 実際の削除は reader スレッドから Exited が届いたときに行う
-                    Some(p) => p.kill(),
-                    None => {}
-                }
+                self.close_pane(active);
             }
             Action::ScrollMode => self.scrolling = true,
             Action::ToggleMouse => {
@@ -816,15 +836,22 @@ impl App {
         }
         let keep = pane.keep_on_exit();
         let closing = pane.is_closing();
+        let stop_requested = pane.stop_requested;
         let program = pane.program().cloned();
         let Some(exit) = pane.mark_exited() else { return };
         if exit.was_program {
             self.runs.entry(id).or_default().exit = Some(exit.success);
         }
 
-        // 自動再起動（restart）．C-q q で閉じたときと autostart: false のペインは対象外
+        // Stop ボタンで止めたのなら，待つのは終わり（stop のプロセスは裏で回収する）
+        if !closing && let Some(st) = self.stopping.remove(&id) {
+            self.background.push(st.child);
+        }
+
+        // 自動再起動（restart）．C-q q で閉じたとき，Stop ボタンで止めたとき，autostart: false のペインは対象外
         let wants_restart = exit.was_program
             && !closing
+            && !stop_requested
             && program.as_ref().is_some_and(|p| {
                 p.autostart
                     && match p.restart {
@@ -882,6 +909,7 @@ impl App {
     /// 条件（started）がそろうことがあるので，起動するものがなくなるまで繰り返す．
     fn check_waits(&mut self) {
         self.run_restarts();
+        self.poll_stops();
         // ペインが抱えている問題（ログファイルを開けないなど）を表示する
         for pane in self.panes.values_mut() {
             if let Some(w) = pane.warning.take() {
@@ -908,7 +936,9 @@ impl App {
 
     /// 次に check_waits が必要になる時刻（delay の待ち）．
     fn next_deadline(&self) -> Option<Instant> {
-        self.waits.values().filter_map(Wait::deadline).chain(self.restarts.values().copied()).min()
+        // stop の実行中は，終わったかを 0.1 秒ごとに見る
+        let poll = (!self.stopping.is_empty() || !self.background.is_empty()).then(|| Instant::now() + std::time::Duration::from_millis(100));
+        self.waits.values().filter_map(Wait::deadline).chain(self.restarts.values().copied()).chain(poll).min()
     }
 
     /// 待機中のペインを（条件にかかわらず）今すぐ起動する．
@@ -950,7 +980,127 @@ impl App {
         }
     }
 
+    /// ペインを閉じる．`stop` があれば先に実行し，プログラムが終わるのを待つ
+    /// （待っている間にもう一度閉じると，すぐ強制終了する）．
+    fn close_pane(&mut self, id: PaneId) {
+        let started = self.runs.get(&id).is_some_and(|r| r.started);
+        let waiting = self.waits.contains_key(&id);
+        let already = self.stopping.contains_key(&id);
+        let Some(p) = self.panes.get_mut(&id) else { return };
+        // Stop ボタンで止めている途中なら，閉じる方に切り替える
+        let already = already && self.stopping.get(&id).is_some_and(|s| s.close);
+        let has_stop = started && !waiting && p.program().is_some_and(|pr| pr.stop.is_some());
+        if p.is_dead() {
+            // プログラムは終わっているが，後始末（コンテナの削除など）は行う
+            if has_stop && let Some(child) = p.spawn_stop() {
+                self.background.push(child);
+            }
+            self.remove_pane(id);
+            return;
+        }
+        if has_stop && !already {
+            let timeout = p.program().map_or(std::time::Duration::from_secs(10), |pr| pr.stop_timeout);
+            if let Some(child) = p.spawn_stop() {
+                p.set_closing();
+                self.stopping.insert(id, Stopping { child, deadline: Instant::now() + timeout, close: true });
+                let name = p.program().map_or(String::new(), |pr| pr.name.clone());
+                self.info = Some(format!("Stopping {name}... (close it again to force it)"));
+                return;
+            }
+        }
+        // 実際の削除は reader スレッドから Exited が届いたときに行う
+        if let Some(st) = self.stopping.remove(&id) {
+            self.background.push(st.child);
+        }
+        if let Some(p) = self.panes.get_mut(&id) {
+            p.kill();
+        }
+    }
+
+    /// Stop ボタン（C-q s）: stop を実行し，プログラムが終わるのを待つ（ペインは残す）．
+    /// プログラムがもう止まっていれば，後始末として stop だけを実行する．
+    /// 待っている間にもう一度押すと，すぐ強制終了する．
+    fn stop_pane(&mut self, id: PaneId) {
+        if self.waits.contains_key(&id) {
+            return;
+        }
+        let Some(p) = self.panes.get_mut(&id) else { return };
+        let Some(program) = p.program().cloned() else { return };
+        let Some(stop) = program.stop.clone() else {
+            self.info = Some(format!("{} has no stop command (write stop: in the task file)", program.name));
+            return;
+        };
+        if self.stopping.contains_key(&id) {
+            p.terminate();
+            return;
+        }
+        if p.is_dead() {
+            if let Some(child) = p.spawn_stop() {
+                self.background.push(child);
+                self.info = Some(format!("Running stop for {}: {stop}", program.name));
+            }
+            return;
+        }
+        if let Some(child) = p.spawn_stop() {
+            p.stop_requested = true;
+            self.restarts.remove(&id);
+            self.stopping.insert(id, Stopping { child, deadline: Instant::now() + program.stop_timeout, close: false });
+            self.info = Some(format!("Stopping {}... (press Stop again to force it)", program.name));
+        }
+    }
+
+    /// stop を実行中のペインのうち，stop が終わったか時間切れになったものを強制終了する
+    /// （閉じる場合はペインも閉じる）．終わった stop のプロセスを回収する．
+    fn poll_stops(&mut self) {
+        let now = Instant::now();
+        let done: Vec<PaneId> = self
+            .stopping
+            .iter_mut()
+            .filter_map(|(id, st)| (now >= st.deadline || matches!(st.child.try_wait(), Ok(Some(_)))).then_some(*id))
+            .collect();
+        for id in done {
+            let Some(st) = self.stopping.remove(&id) else { continue };
+            self.background.push(st.child);
+            match self.panes.get_mut(&id) {
+                Some(p) if p.is_dead() && st.close => self.remove_pane(id),
+                Some(p) if p.is_dead() => {}
+                Some(p) if st.close => p.kill(),
+                Some(p) => p.terminate(),
+                None => {}
+            }
+        }
+        self.background.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_)) | Err(_)));
+    }
+
+    /// セッションを終えるとき: 全ペインの stop を実行し，終わるのを（いちばん長い timeout まで）待つ．
+    fn run_all_stops(&mut self) {
+        let mut deadline = Instant::now();
+        let ids: Vec<PaneId> = self.panes.keys().copied().collect();
+        for id in ids {
+            if self.stopping.contains_key(&id) || self.waits.contains_key(&id) || !self.runs.get(&id).is_some_and(|r| r.started) {
+                continue;
+            }
+            let Some(p) = self.panes.get_mut(&id) else { continue };
+            let timeout = p.program().map_or(std::time::Duration::ZERO, |pr| pr.stop_timeout);
+            if let Some(child) = p.spawn_stop() {
+                deadline = deadline.max(Instant::now() + timeout);
+                self.background.push(child);
+            }
+        }
+        for (_, st) in self.stopping.drain() {
+            deadline = deadline.max(st.deadline);
+            self.background.push(st.child);
+        }
+        while !self.background.is_empty() && Instant::now() < deadline {
+            self.background.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_)) | Err(_)));
+            thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     fn remove_pane(&mut self, id: PaneId) {
+        if let Some(st) = self.stopping.remove(&id) {
+            self.background.push(st.child);
+        }
         self.waits.remove(&id);
         self.restarts.remove(&id);
         self.restart_counts.remove(&id);
@@ -1177,6 +1327,16 @@ fn run_server(name: &str, size: (u16, u16), opts: &Opts) -> Result<()> {
         }
     }
 
+    // stop を実行して待つ間，接続中の端末には「Stopping」と出しておく
+    if let Some(c) = &mut client {
+        app.info = Some("Stopping the programs...".into());
+        app.confirm_quit = false;
+        let (frame, cursor, modes) = app.compose();
+        let mut buf = Vec::new();
+        renderer.draw(&mut buf, frame, cursor, modes)?;
+        let _ = session::write_frame(&mut c.stream, session::OUTPUT, &buf);
+    }
+    app.run_all_stops();
     for pane in app.panes.values_mut() {
         pane.kill();
     }

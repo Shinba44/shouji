@@ -37,6 +37,7 @@ const GROUPS: &[Group] = &[
         items: &[
             ("r", "Run a stopped program again"),
             ("s", "Open a shell in its directory"),
+            ("C-q s", "Run its stop command"),
             ("q", "Close the pane"),
             ("Enter", "Start a waiting program now"),
         ],
