@@ -1180,7 +1180,7 @@ fn load(opts: &Opts) -> Result<(Config, Vec<(usize, Vec<String>)>)> {
     let cwd = std::env::current_dir()?;
     let mut startup = Vec::new();
     for (path, names) in &opts.task_args {
-        let entry = TaskEntry::new(path, None, &cwd);
+        let entry = TaskEntry::standalone(path, &cwd);
         entry.load()?.select(names).with_context(|| format!("cannot select programs in {path}"))?;
         startup.push((config.add_task(entry), names.clone()));
     }

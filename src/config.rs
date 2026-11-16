@@ -4,11 +4,20 @@
 //! ディレクトリから解決する．
 //!
 //! ```yaml
+//! env:                          # すべてのタスクに付ける環境変数（pre_command も書ける）
+//!   ROS_MASTER_URI: ${ROS_MASTER_URI:-http://localhost:11311}
 //! tasks:
 //!   - task.yaml                 # パスだけでもよい（名前はファイル名から）
 //!   - path: ~/work/api/task.yaml
 //!     name: api
 //! ```
+//!
+//! `-t` で開いたタスクファイルは，同じディレクトリに shouji.yaml があれば，その env と
+//! pre_command を使う（一覧に載っていればその shouji.yaml のもの）．
+//!
+//! env の値はシェルのダブルクォートの中と同じように展開する（`${VAR:-既定値}` や `$(コマンド)`）．
+//! shouji.yaml → タスク → ウィンドウ → プログラム の順に，上から書いた順で export するので，
+//! 後に書いた値から前の変数を使える．
 //!
 //! タスクファイル（例: `task.yaml`）には，一緒に起動するプログラムを書く．
 //! 選ぶと新しいウィンドウを開き，各プログラムを分割したペインで起動する．
@@ -62,8 +71,52 @@ fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    /// すべてのタスクに付ける環境変数．
+    #[serde(default, deserialize_with = "ordered_env")]
+    env: Env,
+    /// すべてのタスクのプログラムの command の前に実行するコマンド．
+    pre_command: Option<String>,
     #[serde(default)]
     tasks: Vec<RawTaskEntry>,
+}
+
+/// 環境変数（名前, 値）．値はシェルで展開する．YAML に書いた順に並べる（後の値から前の変数を使える）．
+pub type Env = Vec<(String, String)>;
+
+/// `env:` のマップを，書いた順のまま読む．
+fn ordered_env<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Env, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Env;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("env must be a map of NAME: value")
+        }
+        fn visit_unit<E>(self) -> Result<Env, E> {
+            Ok(Vec::new())
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<Env, A::Error> {
+            let mut out = Vec::new();
+            while let Some((k, v)) = m.next_entry::<String, String>()? {
+                out.push((k, v));
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_any(V)
+}
+
+/// shouji.yaml に書いた，すべてのタスクに共通の設定．
+#[derive(Debug, Default)]
+struct Shared {
+    env: Env,
+    pre_command: Option<String>,
+}
+
+impl Shared {
+    fn load(path: &Path) -> Result<Self> {
+        let raw: RawConfig = read_yaml(path)?;
+        Ok(Self { env: raw.env, pre_command: raw.pre_command })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,10 +147,12 @@ pub struct TaskEntry {
     pub name: String,
     /// 解決済みの絶対パス（または起動ディレクトリからのパス）．
     pub path: PathBuf,
+    /// 共通の env・pre_command を読む shouji.yaml（タスクを開くたびに読み直す）．
+    pub shared: Option<PathBuf>,
 }
 
 impl Config {
-    fn from_raw(raw: RawConfig, base: &Path) -> Self {
+    fn from_raw(raw: RawConfig, base: &Path, file: Option<&Path>) -> Self {
         let tasks = raw
             .tasks
             .into_iter()
@@ -106,7 +161,7 @@ impl Config {
                     RawTaskEntry::Path(p) => (p, None),
                     RawTaskEntry::Full(RawTaskFull { path, name }) => (path, name),
                 };
-                TaskEntry::new(&path, name, base)
+                TaskEntry { shared: file.map(Path::to_path_buf), ..TaskEntry::new(&path, name, base) }
             })
             .collect();
         Self { tasks }
@@ -126,7 +181,7 @@ impl Config {
     fn load_file(path: &Path) -> Result<Self> {
         let raw = read_yaml(path)?;
         let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        Ok(Self::from_raw(raw, &base))
+        Ok(Self::from_raw(raw, &base, Some(path)))
     }
 
     /// `explicit` が指定されていればそれを，なければ
@@ -154,8 +209,8 @@ impl Config {
 struct RawTask {
     name: Option<String>,
     /// タスク内のすべてのプログラムに付ける環境変数．
-    #[serde(default)]
-    env: BTreeMap<String, String>,
+    #[serde(default, deserialize_with = "ordered_env")]
+    env: Env,
     /// タスク内のすべてのプログラムの command の前に実行するコマンド．
     pre_command: Option<String>,
     /// 1 つのウィンドウに並べる場合．
@@ -169,8 +224,8 @@ struct RawTask {
 struct RawWindow {
     name: String,
     /// このウィンドウのプログラムに付ける環境変数．
-    #[serde(default)]
-    env: BTreeMap<String, String>,
+    #[serde(default, deserialize_with = "ordered_env")]
+    env: Env,
     /// このウィンドウのプログラムの command の前に実行するコマンド．
     pre_command: Option<String>,
     programs: Vec<RawProgram>,
@@ -183,8 +238,8 @@ struct RawProgram {
     command: String,
     pre_command: Option<String>,
     cwd: Option<String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
+    #[serde(default, deserialize_with = "ordered_env")]
+    env: Env,
     #[serde(default = "default_true")]
     keep_on_exit: bool,
     #[serde(default = "default_true")]
@@ -292,7 +347,9 @@ pub struct Program {
     pub pre_command: Option<String>,
     /// 作業ディレクトリ．省略時は shouji を起動したディレクトリ．
     pub cwd: Option<PathBuf>,
-    pub env: BTreeMap<String, String>,
+    /// 環境変数．shouji.yaml → タスク → ウィンドウ → プログラム の順に，書いた順で並ぶ
+    /// （同じ名前があれば後のものが効く）．値はシェルで展開する．
+    pub env: Env,
     /// 終了してもペインを残す（ログを読めるように）．省略時は true．
     pub keep_on_exit: bool,
     /// すぐ起動するか．false ならシェルを開き，コマンドを入力した状態で待つ（Enter で実行）．
@@ -330,23 +387,34 @@ impl TaskEntry {
         let name = name.unwrap_or_else(|| {
             path.file_stem().map_or_else(|| "task".into(), |s| s.to_string_lossy().into_owned())
         });
-        Self { name, path }
+        Self { name, path, shared: None }
+    }
+
+    /// `-t` で開くタスク．同じディレクトリに shouji.yaml があれば，その共通設定を使う．
+    pub fn standalone(path: &str, base: &Path) -> Self {
+        let entry = Self::new(path, None, base);
+        let config = entry.path.parent().map(|d| d.join("shouji.yaml")).filter(|p| p.is_file());
+        Self { shared: config, ..entry }
     }
 
     /// タスクファイルを読む（選ばれるたびに読むので，編集はすぐ反映される）．
     pub fn load(&self) -> Result<Task> {
         let raw: RawTask = read_yaml(&self.path)?;
         let base = self.path.parent().map(Path::to_path_buf).unwrap_or_default();
-        Task::from_raw(raw, &self.name, &base).with_context(|| format!("invalid format in {}", self.path.display()))
+        let shared = match &self.shared {
+            Some(path) => Shared::load(path)?,
+            None => Shared::default(),
+        };
+        Task::from_raw(raw, &self.name, &base, &shared).with_context(|| format!("invalid format in {}", self.path.display()))
     }
 }
 
 impl Task {
-    fn from_raw(raw: RawTask, default_name: &str, base: &Path) -> Result<Self> {
+    fn from_raw(raw: RawTask, default_name: &str, base: &Path, shared: &Shared) -> Result<Self> {
         let task_name = raw.name.unwrap_or_else(|| default_name.into());
         // programs だけならタスク名のウィンドウ 1 つにまとめる
         let raw_windows = match (raw.programs, raw.windows) {
-            (Some(programs), None) => vec![RawWindow { name: task_name.clone(), env: BTreeMap::new(), pre_command: None, programs }],
+            (Some(programs), None) => vec![RawWindow { name: task_name.clone(), env: Vec::new(), pre_command: None, programs }],
             (None, Some(windows)) => windows,
             (Some(_), Some(_)) => bail!("write either programs or windows, not both"),
             (None, None) => bail!("write programs or windows"),
@@ -358,14 +426,21 @@ impl Task {
                 bail!("window {} has no programs", w.name);
             }
             let start = all.len();
-            // env は タスク全体 → ウィンドウ → プログラム の順に重ね，狭い領域の値を優先する
+            // env は shouji.yaml → タスク全体 → ウィンドウ → プログラム の順に並べる
+            // （この順に export するので，狭い領域の値が優先され，外側の値を使って書ける）
             all.extend(w.programs.into_iter().map(|mut p| {
-                let mut env = raw.env.clone();
-                env.extend(w.env.clone());
-                env.extend(std::mem::take(&mut p.env));
+                let mut env = shared.env.clone();
+                env.extend(raw.env.iter().cloned());
+                env.extend(w.env.iter().cloned());
+                env.append(&mut p.env);
                 p.env = env;
                 // pre_command は狭い領域のものが丸ごと優先される（空文字列なら付けない）
-                p.pre_command = p.pre_command.take().or_else(|| w.pre_command.clone()).or_else(|| raw.pre_command.clone());
+                p.pre_command = p
+                    .pre_command
+                    .take()
+                    .or_else(|| w.pre_command.clone())
+                    .or_else(|| raw.pre_command.clone())
+                    .or_else(|| shared.pre_command.clone());
                 p
             }));
             windows.push(TaskWindow { name: w.name, programs: (start..all.len()).collect() });
@@ -385,6 +460,9 @@ impl Task {
 
         let mut programs = Vec::with_capacity(raw_programs.len());
         for p in &raw_programs {
+            if let Some((k, _)) = p.env.iter().find(|(k, _)| !valid_env_name(k)) {
+                bail!("{}: {k:?} cannot be an environment variable name (use letters, digits and _)", p.name);
+            }
             let mut after = Vec::new();
             for a in &p.after {
                 match a {
@@ -490,6 +568,12 @@ impl Task {
     }
 }
 
+/// シェルの変数名として使えるか（英字か _ で始まり，英数字と _ だけ）．
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// after が循環していないか（a → b → a など）を調べる．
 fn check_cycle(programs: &[Program]) -> Result<()> {
     // 0: 未訪問，1: 探索中，2: 済み
@@ -528,7 +612,7 @@ mod tests {
     fn parse_config() {
         let raw: RawConfig =
             serde_yaml_ng::from_str("tasks:\n  - task.yaml\n  - path: /abs/api.yaml\n    name: api\n").unwrap();
-        let cfg = Config::from_raw(raw, Path::new("/proj"));
+        let cfg = Config::from_raw(raw, Path::new("/proj"), None);
         assert_eq!(cfg.tasks.len(), 2);
         assert_eq!(cfg.tasks[0].name, "task");
         assert_eq!(cfg.tasks[0].path, PathBuf::from("/proj/task.yaml"));
@@ -542,10 +626,10 @@ mod tests {
             "programs:\n  - name: top\n    command: top\n  - name: srv\n    command: python3 -m http.server\n    cwd: ./srv\n    env: {PORT: '8000'}\n",
         )
         .unwrap();
-        let task = Task::from_raw(raw, "dev", Path::new("/proj")).unwrap();
+        let task = Task::from_raw(raw, "dev", Path::new("/proj"), &Shared::default()).unwrap();
         assert_eq!(task.name, "dev");
         assert_eq!(task.programs.len(), 2);
-        assert_eq!(task.programs[1].env["PORT"], "8000");
+        assert_eq!(task.programs[1].env, vec![("PORT".to_string(), "8000".to_string())]);
         assert_eq!(task.programs[1].cwd, Some(PathBuf::from("/proj/./srv")));
         assert_eq!(task.programs[0].cwd, None);
         assert!(task.programs[0].keep_on_exit);
@@ -553,7 +637,7 @@ mod tests {
     }
 
     fn task(yaml: &str) -> Result<Task> {
-        Task::from_raw(serde_yaml_ng::from_str(yaml)?, "t", Path::new("/proj"))
+        Task::from_raw(serde_yaml_ng::from_str(yaml)?, "t", Path::new("/proj"), &Shared::default())
     }
 
     #[test]
@@ -600,15 +684,26 @@ mod tests {
             "env: {A: task, B: task, C: task}\nwindows:\n  - name: w1\n    env: {B: win, C: win}\n    programs:\n      - name: p1\n        command: x\n        env: {C: prog}\n      - name: p2\n        command: y\n  - name: w2\n    programs:\n      - name: p3\n        command: z\n",
         )
         .unwrap();
-        let env = |i: usize| t.programs[i].env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
-        // 狭い領域の値が優先される: プログラム > ウィンドウ > タスク
-        assert_eq!(env(0), "A=task B=win C=prog");
-        assert_eq!(env(1), "A=task B=win C=win");
-        assert_eq!(env(2), "A=task B=task C=task");
+        let env = |t: &Task, i: usize| t.programs[i].env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+        // 外側から順に並ぶ（後のものが効く）: タスク → ウィンドウ → プログラム
+        assert_eq!(env(&t, 0), "A=task B=task C=task B=win C=win C=prog");
+        assert_eq!(env(&t, 2), "A=task B=task C=task");
 
-        // programs だけのタスクでも，タスク全体の env が効く
-        let t = task("env: {A: task}\nprograms:\n  - name: p\n    command: x\n    env: {B: prog}\n").unwrap();
-        assert_eq!(t.programs[0].env.len(), 2);
+        // programs だけのタスクでも，タスク全体の env が効く．書いた順のまま
+        let t = task("env: {Z: task}\nprograms:\n  - name: p\n    command: x\n    env: {B: prog, A: $B}\n").unwrap();
+        assert_eq!(env(&t, 0), "Z=task B=prog A=$B");
+
+        // shouji.yaml の共通設定が一番外側．pre_command は狭いものが優先
+        let raw: RawConfig = serde_yaml_ng::from_str("env: {S: shared}\npre_command: . ./env.sh\n").unwrap();
+        let shared = Shared { env: raw.env, pre_command: raw.pre_command };
+        let yaml = "env: {T: task}\nprograms:\n  - name: p\n    command: x\n  - name: q\n    command: y\n    pre_command: echo q\n";
+        let t = Task::from_raw(serde_yaml_ng::from_str(yaml).unwrap(), "t", Path::new("/proj"), &shared).unwrap();
+        assert_eq!(env(&t, 0), "S=shared T=task");
+        assert_eq!(t.programs[0].pre_command.as_deref(), Some(". ./env.sh"));
+        assert_eq!(t.programs[1].pre_command.as_deref(), Some("echo q"));
+
+        let e = format!("{:#}", task("programs:\n  - name: p\n    command: x\n    env: {MY-VAR: 1}\n").unwrap_err());
+        assert!(e.contains("cannot be an environment variable name"), "{e}");
     }
 
     #[test]

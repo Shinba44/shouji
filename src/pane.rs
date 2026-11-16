@@ -157,9 +157,11 @@ impl Pane {
 
         let login_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         let script = match program {
-            Some(p) if !shell && typeahead.is_none() => Some(program_script(p.pre_command.as_deref(), &p.command)),
-            // シェルを開くときも pre_command を実行してから，その環境でシェルに入れ替える
-            Some(Program { pre_command: Some(pre), .. }) => Some(shell_script(pre, &login_shell)),
+            Some(p) if !shell && typeahead.is_none() => Some(program_script(&p.env, p.pre_command.as_deref(), &p.command)),
+            // シェルを開くときも env と pre_command を設定してから，その環境でシェルに入れ替える
+            Some(p) if !p.env.is_empty() || p.pre_command.is_some() => {
+                Some(shell_script(&p.env, p.pre_command.as_deref(), &login_shell))
+            }
             _ => None,
         };
         let mut cmd = match script {
@@ -174,9 +176,6 @@ impl Pane {
         cmd.env("SHOUJI", "1");
         if let Some(cwd) = program.and_then(|p| p.cwd.clone()).or_else(|| std::env::current_dir().ok()) {
             cmd.cwd(cwd);
-        }
-        for (k, v) in program.map(|p| &p.env).into_iter().flatten() {
-            cmd.env(k, v);
         }
         let child = pair.slave.spawn_command(cmd)?;
         // slave を閉じておかないと，子が終了しても reader が EOF にならない．
@@ -387,8 +386,8 @@ impl Pane {
         let stop = p.stop.as_ref()?;
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         let mut cmd = std::process::Command::new(shell);
-        cmd.arg("-c").arg(program_script(p.pre_command.as_deref(), stop));
-        cmd.envs(&p.env).env("SHOUJI", "1").stdin(std::process::Stdio::null());
+        cmd.arg("-c").arg(program_script(&p.env, p.pre_command.as_deref(), stop));
+        cmd.env("SHOUJI", "1").stdin(std::process::Stdio::null());
         if let Some(cwd) = p.cwd.clone().or_else(|| std::env::current_dir().ok()) {
             cmd.current_dir(cwd);
         }
@@ -417,20 +416,49 @@ impl Pane {
     }
 }
 
-/// プログラムとして実行するスクリプト．pre_command が失敗したら command は実行しない．
+/// シェルの 1 引数として渡せるようにシングルクォートで囲む．
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// env を設定するスクリプト．値はダブルクォートの中に置くので，`${VAR:-x}` や `$(cmd)` を
+/// シェルが展開する．書いた順に export するので，後の値から前の変数を使える．
+/// 展開する値（`$` か `` ` `` を含む）が空になったら，警告を出す（プログラムは起動する）．
+fn env_script(env: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (k, v) in env {
+        s.push_str(&format!("export {k}=\"{v}\"\n"));
+    }
+    // 同じ名前は最後の値だけ確かめる
+    for (i, (k, v)) in env.iter().enumerate() {
+        let last = !env[i + 1..].iter().any(|(k2, _)| k2 == k);
+        if last && (v.contains('$') || v.contains('`')) {
+            s.push_str(&format!(
+                "[ -n \"${k}\" ] || printf '\\033[33mshouji: warning: %s is empty (env: %s)\\033[0m\\n' {} {} >&2\n",
+                quote(k),
+                quote(v)
+            ));
+        }
+    }
+    s
+}
+
+/// プログラムとして実行するスクリプト．env を設定し，pre_command が失敗したら command は実行しない．
 /// pre_command は複数行やコメントでもよいように `{ }` で囲む（終了コードは最後のコマンドのもの）．
-fn program_script(pre: Option<&str>, command: &str) -> String {
+fn program_script(env: &[(String, String)], pre: Option<&str>, command: &str) -> String {
+    let env = env_script(env);
     match pre {
-        Some(pre) => format!("{{\n{pre}\n}} && {{\n{command}\n}}"),
-        None => command.to_string(),
+        Some(pre) => format!("{env}{{\n{pre}\n}} && {{\n{command}\n}}"),
+        None => format!("{env}{command}"),
     }
 }
 
-/// pre_command を実行してから，その環境のままシェルに入れ替えるスクリプト．
+/// env と pre_command を設定してから，その環境のままシェルに入れ替えるスクリプト．
 /// pre_command が失敗しても，原因を調べられるようにシェルは開く．
-fn shell_script(pre: &str, shell: &str) -> String {
-    let quoted = format!("'{}'", shell.replace('\'', r"'\''"));
-    format!("{{\n{pre}\n}}\nexec {quoted}")
+fn shell_script(env: &[(String, String)], pre: Option<&str>, shell: &str) -> String {
+    let env = env_script(env);
+    let pre = pre.map_or(String::new(), |p| format!("{{\n{p}\n}}\n"));
+    format!("{env}{pre}exec {}", quote(shell))
 }
 
 #[cfg(test)]
@@ -445,22 +473,52 @@ mod script_tests {
 
     #[test]
     fn pre_command_runs_in_same_shell() {
-        assert_eq!(program_script(None, "echo hi"), "echo hi");
+        assert_eq!(program_script(&[], None, "echo hi"), "echo hi");
         // pre_command の変数が command から見える．コメントで終わっても壊れない
-        let (ok, out) = run(&program_script(Some("X=from-pre # comment"), "echo $X"));
+        let (ok, out) = run(&program_script(&[], Some("X=from-pre # comment"), "echo $X"));
         assert!(ok);
         assert_eq!(out, "from-pre\n");
         // pre_command が失敗したら command は実行せず，失敗で終わる
-        let (ok, out) = run(&program_script(Some("false"), "echo ran"));
+        let (ok, out) = run(&program_script(&[], Some("false"), "echo ran"));
         assert!(!ok);
         assert_eq!(out, "");
     }
 
     #[test]
     fn shell_script_execs_shell() {
-        let (ok, out) = run(&shell_script("X=1", "/bin/echo"));
+        let (ok, out) = run(&shell_script(&[], Some("X=1"), "/bin/echo"));
         assert!(ok);
         assert_eq!(out, "\n");
-        assert!(shell_script("x", "/it's/sh").ends_with(r"exec '/it'\''s/sh'"));
+        assert!(shell_script(&[], Some("x"), "/it's/sh").ends_with(r"exec '/it'\''s/sh'"));
+        let env = vec![("X".to_string(), "a b".to_string())];
+        assert_eq!(shell_script(&env, None, "/bin/sh"), "export X=\"a b\"\nexec '/bin/sh'");
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn env_is_expanded_in_order() {
+        let e = env(&[
+            ("IF", "${SHOUJI_TEST_UNSET:-eth0}"),
+            ("ADDR", "$(echo 10.0.0.1)"),
+            ("URL", "http://$ADDR:1 on $IF"),
+            ("IF", "wlan0"),
+        ]);
+        let out = Command::new("sh").args(["-c", &program_script(&e, None, "echo \"$URL|$IF\"")]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "http://10.0.0.1:1 on eth0|wlan0\n");
+        assert!(out.stderr.is_empty());
+    }
+
+    #[test]
+    fn empty_env_warns() {
+        let e = env(&[("IP", "$(true)"), ("PLAIN", ""), ("Q", "it's")]);
+        let out = Command::new("sh").args(["-c", &program_script(&e, None, "echo \"ran $Q\"")]).output().unwrap();
+        // 警告は出すが，プログラムは起動する
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "ran it's\n");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("shouji: warning: IP is empty (env: $(true))"), "{err}");
+        assert!(!err.contains("PLAIN"));
     }
 }

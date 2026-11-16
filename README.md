@@ -54,18 +54,23 @@ cargo run -- -t sample_config/task.yaml build server  # only "build" and "server
 
 ## Configuration
 
-`shouji.yaml`: the tasks listed in the launcher
+`shouji.yaml`: the tasks listed in the launcher, and settings shared by all of them
 
 ```yaml
+env:                                 # added to every task below (pre_command works too)
+  NETWORK_IF: ${NETWORK_IF:-eth0}
+  ROS_IP: $(ip -4 -o addr show $NETWORK_IF | awk '{print $4}' | cut -d/ -f1)
 tasks:
   - task.yaml
 ```
+
+A task opened with `-t` uses the `shouji.yaml` in the same directory as the task file.
 
 `task.yaml`: the programs started together
 
 ```yaml
 name: dev
-env: { APP_ENV: development }       # task < window < program (the narrower one wins)
+env: { APP_ENV: development }       # shouji.yaml < task < window < program (the narrower one wins)
 windows:
   - name: app
     programs:
@@ -83,6 +88,10 @@ windows:
         command: git log --oneline
         autostart: false             # type the command into a shell and wait for Enter
 ```
+
+`env` values are expanded like a shell string in double quotes: `${VAR:-default}`, `$(command)`, `$HOME/bin:$PATH`.
+They are set in order (shouji.yaml, task, window, program, each top to bottom), so a value can use the ones before it.
+Write `\$` or `\"` for a literal `$` or `"`. If a value that uses `$` comes out empty, the pane shows a warning.
 
 `pre_command` runs in the same shell before `command` (and before the shell opened by `autostart: false` or `s`).
 Like `env`, it can be set on the task, a window or a program; the narrowest one wins.

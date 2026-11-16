@@ -67,7 +67,7 @@ windows:
 
   - name: monitor
     env:
-      ROSCONSOLE_FORMAT: '[${severity}] [${node}] ${message}'
+      ROSCONSOLE_FORMAT: '[\${severity}] [\${node}] \${message}'   # \$ で shouji に展開させない
     programs:
       - name: pose
         command: rostopic echo /turtle1/pose

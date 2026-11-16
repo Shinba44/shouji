@@ -448,7 +448,6 @@ pub fn put_clipped(frame: &mut Frame, x: u16, y: u16, s: &str, style: Style, end
 mod tests {
     use super::*;
     use crate::config::{Program, TaskWindow};
-    use std::collections::BTreeMap;
     use std::time::Duration;
 
     #[test]
@@ -471,7 +470,7 @@ mod tests {
             command: format!("run {name}"),
             pre_command: None,
             cwd: None,
-            env: BTreeMap::new(),
+            env: Vec::new(),
             keep_on_exit: true,
             autostart: true,
             after: Vec::new(),

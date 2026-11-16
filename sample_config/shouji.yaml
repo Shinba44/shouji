@@ -7,6 +7,12 @@
 #     name: api                  #   メニューに出す名前（省略可）
 #
 # 起動時にタスクを開きたいときは，shouji -t task.yaml のように指定する．
+#
+# env と pre_command を書くと，ここに並べたすべてのタスクに付く（タスク側の値が優先）．
+# shouji -t で開いたタスクにも，そのタスクファイルと同じディレクトリの shouji.yaml のものが付く．
+#   env:
+#     ROS_MASTER_URI: ${ROS_MASTER_URI:-http://localhost:11311}
+#   pre_command: . /opt/ros/noetic/setup.bash
 
 tasks:
   - task.yaml
