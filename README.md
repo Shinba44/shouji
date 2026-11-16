@@ -11,6 +11,19 @@ cargo run -- -c sample_config/shouji.yaml # use a specific config (pick a task w
 cargo run                                 # looks for ./shouji.yaml, then ~/.config/shouji/config.yaml
 ```
 
+### Sessions (detach / attach)
+
+shouji keeps running in the background, like tmux. Leave with `C-q d` (or the `Leave` button)
+and choose **Detach**: your programs keep running even if you close the terminal.
+
+```sh
+shouji -t task.yaml        # starts session "task" (named after the file), or attaches if it is running
+shouji -s dev -t task.yaml # pick the session name yourself
+shouji attach [SESSION]    # go back (also: shouji a)
+shouji ls                  # list running sessions
+shouji kill [SESSION]      # stop a session and all its programs
+```
+
 To start only part of a task, list window or program names after the task file:
 
 ```sh
@@ -82,7 +95,7 @@ start with `Ctrl-q`: press `Ctrl-q`, let go, then press the key.
 | `C-q [` | Scroll back (`k/j u/d g/G`, `q` to stop; the mouse wheel works too) |
 | `C-q t` | Show / hide the layout panel |
 | `C-q m` | Mouse on / off |
-| `C-q d` | Quit (asks first) |
+| `C-q d` | Leave: detach (programs keep running) or quit |
 | `C-q C-q` | Send `Ctrl-q` to the program |
 
 In a pane whose program has stopped, press `r` to run it again, `s` for a shell, or `q` to close it.

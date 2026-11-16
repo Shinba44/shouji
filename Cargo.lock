@@ -557,6 +557,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "crossterm",
+ "libc",
  "portable-pty",
  "serde",
  "serde_yaml_ng",

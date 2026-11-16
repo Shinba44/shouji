@@ -9,10 +9,12 @@ mod mouse;
 mod pane;
 mod render;
 mod scroll;
+mod session;
 mod ui;
 
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Instant;
@@ -62,8 +64,20 @@ pub enum Event {
     Output,
     /// ペインのプロセスが終了した（ペイン, 何回目の起動か）．
     Exited(PaneId, u64),
-    /// 端末サイズが変わった．
-    Resize,
+    /// 端末サイズが変わった（幅, 高さ）．
+    Resize(u16, u16),
+    /// クライアントが接続した（接続番号, 書き込み先, 幅, 高さ）．
+    Attach(u64, UnixStream, u16, u16),
+    /// クライアントからのキー入力．
+    ClientInput(u64, Vec<u8>),
+    /// クライアントの端末のサイズが変わった．
+    ClientResize(u64, u16, u16),
+    /// クライアントが切断した．
+    ClientGone(u64),
+    /// `shouji ls` からの問い合わせ（返事を書く先）．
+    Info(UnixStream),
+    /// `shouji kill`．
+    Kill,
 }
 
 /// raw モードと代替画面を有効にし，drop 時に元へ戻す．
@@ -235,6 +249,8 @@ struct App {
     sidebar: bool,
     /// 終了の確認中か（C-q d か Quit ボタン）．
     confirm_quit: bool,
+    /// detach する（クライアントだけ切り離し，プログラムは動かし続ける）．
+    detach: bool,
     /// スクロールモード中か（アクティブなペインの過去の出力を見ている）．
     scrolling: bool,
     /// ステータスバーに出すエラー．次のキー入力かクリックで消える．
@@ -259,8 +275,7 @@ struct App {
 impl App {
     /// `startup` はコマンドラインの `-t` で指定されたタスクの添字と，起動するものの名前（空なら全部）．
     /// 起動後はその最後のウィンドウを表示する．
-    fn new(tx: Sender<Event>, config: Config, startup: &[(usize, Vec<String>)]) -> Result<Self> {
-        let size = terminal::size()?;
+    fn new(tx: Sender<Event>, config: Config, startup: &[(usize, Vec<String>)], size: (u16, u16)) -> Result<Self> {
         // マウス操作は常にオンで起動する（C-q m で切り替えられる）
         let mouse = true;
         let mut app = Self {
@@ -275,6 +290,7 @@ impl App {
             help: None,
             sidebar: true,
             confirm_quit: false,
+            detach: false,
             message: None,
             info: None,
             mouse,
@@ -430,12 +446,12 @@ impl App {
             }
             Event::Output => {}
             Event::Exited(id, generation) => self.on_exit(id, generation),
-            Event::Resize => {
-                if let Ok(size) = terminal::size() {
-                    self.size = size;
-                    self.relayout_all();
-                }
+            Event::Resize(w, h) => {
+                self.size = (w.max(1), h.max(1));
+                self.relayout_all();
             }
+            // クライアントとのやり取りはサーバーのループで扱う
+            Event::Attach(..) | Event::ClientInput(..) | Event::ClientResize(..) | Event::ClientGone(_) | Event::Info(_) | Event::Kill => {}
         }
     }
 
@@ -450,17 +466,28 @@ impl App {
             let result = l.feed(bytes, self.config.tasks.len());
             self.menu_result(result);
         } else if self.confirm_quit {
-            self.confirm_quit = false;
-            if bytes == b"y" || bytes == b"Y" {
-                self.quit = true;
-            }
+            self.confirm_key(bytes);
         } else if self.scrolling {
             self.scroll(bytes);
         } else {
             self.message = None;
             for action in self.input.feed(bytes) {
-                self.do_action(action);
+                // C-q d に続けて打ったキー（同時に届いたもの）は，確認への答えにする
+                match action {
+                    Action::Forward(b) if self.confirm_quit => self.confirm_key(&b),
+                    action => self.do_action(action),
+                }
             }
+        }
+    }
+
+    /// 終了の確認への答え: d で動かしたまま離れる，y ですべて止めて終了，それ以外はやめる．
+    fn confirm_key(&mut self, bytes: &[u8]) {
+        self.confirm_quit = false;
+        match bytes.first() {
+            Some(b'd' | b'D') => self.detach = true,
+            Some(b'y' | b'Y') => self.quit = true,
+            _ => {}
         }
     }
 
@@ -954,89 +981,172 @@ impl App {
     }
 }
 
-fn main() -> Result<()> {
-    if std::env::var_os("SHOUJI").is_some() {
-        bail!("shouji cannot be started inside shouji (SHOUJI is set)");
-    }
+const USAGE: &str = "usage: shouji [-s NAME] [-c CONFIG.yaml] [-t TASK.yaml [NAME...]]...\n\
+    \n       shouji attach [SESSION]   go back to a running session (also: a)\
+    \n       shouji ls                 list running sessions\
+    \n       shouji kill [SESSION]     stop a session and all its programs\
+    \n\
+    \n  -s, --session NAME    session name (default: the first task file's name, or main)\
+    \n                        if it is already running, shouji attaches to it\
+    \n  -c, --config FILE     config file (default: ./shouji.yaml, then ~/.config/shouji/config.yaml)\
+    \n  -t, --task FILE       task file to open at startup (can be repeated)\
+    \n                        NAMEs (window or program names) after it start only those\
+    \n                        e.g. shouji -t task.yaml app           every program in the app window\
+    \n                             shouji -t task.yaml build server  only build and server\
+    \n\
+    \n  In shouji, Ctrl-q d leaves the session (programs keep running).";
 
-    // 設定は raw モードに入る前に読む（エラーを普通に表示するため）
-    const USAGE: &str = "usage: shouji [-c CONFIG.yaml] [-t TASK.yaml [NAME...]]...\n\
-        \n  -c, --config FILE     config file (default: ./shouji.yaml, then ~/.config/shouji/config.yaml)\
-        \n  -t, --task FILE       task file to open at startup (can be repeated)\
-        \n                        NAMEs (window or program names) after it start only those\
-        \n                        e.g. shouji -t task.yaml app           every program in the app window\
-        \n                             shouji -t task.yaml build server  only build and server";
-    let mut config_path = None;
-    // (タスクファイル, 起動するものの名前)
-    let mut task_args: Vec<(String, Vec<String>)> = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
+/// 新しいセッションの指定（コマンドライン）．
+struct Opts {
+    session: Option<String>,
+    config_path: Option<std::path::PathBuf>,
+    /// (タスクファイル, 起動するものの名前)
+    task_args: Vec<(String, Vec<String>)>,
+}
+
+fn parse_opts(args: &[String]) -> Result<Opts> {
+    let mut opts = Opts { session: None, config_path: None, task_args: Vec::new() };
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
         match arg.as_str() {
-            "-c" | "--config" => config_path = Some(std::path::PathBuf::from(args.next().context(USAGE)?)),
-            "-t" | "--task" => task_args.push((args.next().context(USAGE)?, Vec::new())),
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                return Ok(());
-            }
+            "-s" | "--session" => opts.session = Some(session::sanitize(it.next().context(USAGE)?)),
+            "-c" | "--config" => opts.config_path = Some(it.next().context(USAGE)?.into()),
+            "-t" | "--task" => opts.task_args.push((it.next().context(USAGE)?.clone(), Vec::new())),
             _ if arg.starts_with('-') => bail!("unknown argument: {arg}\n{USAGE}"),
             // -t FILE に続く名前
-            _ => match task_args.last_mut() {
-                Some((_, names)) => names.push(arg),
+            _ => match opts.task_args.last_mut() {
+                Some((_, names)) => names.push(arg.clone()),
                 None => bail!("{arg}: names must come after -t TASK.yaml\n{USAGE}"),
             },
         }
     }
-    let mut config = Config::load(config_path.as_deref())?;
+    Ok(opts)
+}
 
-    // -t のタスクはここで一度読んで，書式の誤りを raw モードに入る前に報告する．
-    // メニューから開き直せるよう，タスク一覧にも加える．
+/// 設定と -t のタスクを読む．書式や名前の誤りはここで報告する．
+fn load(opts: &Opts) -> Result<(Config, Vec<(usize, Vec<String>)>)> {
+    let mut config = Config::load(opts.config_path.as_deref())?;
+    // メニューから開き直せるよう，タスク一覧にも加える
     let cwd = std::env::current_dir()?;
     let mut startup = Vec::new();
-    for (path, names) in task_args {
-        let entry = TaskEntry::new(&path, None, &cwd);
-        // 名前の間違いもここで報告する
-        entry.load()?.select(&names).with_context(|| format!("cannot select programs in {path}"))?;
-        startup.push((config.add_task(entry), names));
+    for (path, names) in &opts.task_args {
+        let entry = TaskEntry::new(path, None, &cwd);
+        entry.load()?.select(names).with_context(|| format!("cannot select programs in {path}"))?;
+        startup.push((config.add_task(entry), names.clone()));
     }
+    Ok((config, startup))
+}
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let rest = args.get(1..).unwrap_or_default();
+    match args.first().map(String::as_str) {
+        Some("-h" | "--help") => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        Some("--server") => {
+            // shouji --server NAME WIDTHxHEIGHT [オプション...]（クライアントが起動する）
+            let name = rest.first().context("--server needs a name")?.clone();
+            let size = rest.get(1).and_then(|s| s.split_once('x')).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).unwrap_or((80, 24));
+            run_server(&name, size, &parse_opts(rest.get(2..).unwrap_or_default())?)
+        }
+        Some("ls" | "list") => {
+            let names = session::sessions()?;
+            if names.is_empty() {
+                println!("no shouji session is running");
+            }
+            for name in names {
+                println!("{name}: {}", session::info(&name)?);
+            }
+            Ok(())
+        }
+        Some("kill") => {
+            let name = session::pick(rest.first().map(String::as_str))?;
+            session::kill(&name)?;
+            println!("stopped session {name}");
+            Ok(())
+        }
+        Some("attach" | "a") => {
+            refuse_nesting()?;
+            let name = session::pick(rest.first().map(String::as_str))?;
+            run_client(&name)
+        }
+        _ => {
+            refuse_nesting()?;
+            let opts = parse_opts(&args)?;
+            // 設定の誤りは，サーバーを起動する前にここで報告する
+            load(&opts)?;
+            let name = opts.session.clone().unwrap_or_else(|| {
+                let first = opts.task_args.first().map(|(p, _)| std::path::PathBuf::from(p));
+                session::default_name(first.as_deref())
+            });
+            if session::connect(&name)?.is_none() {
+                let (w, h) = terminal::size().unwrap_or((80, 24));
+                let mut server_args = vec!["--server".to_string(), name.clone(), format!("{w}x{h}")];
+                server_args.extend(args.iter().cloned());
+                session::spawn_server(&name, &server_args)?;
+            } else if !opts.task_args.is_empty() {
+                eprintln!("session {name} is already running: attaching to it (use -s NAME to start another)");
+                thread::sleep(std::time::Duration::from_millis(800));
+            }
+            run_client(&name)
+        }
+    }
+}
+
+fn refuse_nesting() -> Result<()> {
+    if std::env::var_os("SHOUJI").is_some() {
+        bail!("shouji cannot be started inside shouji (SHOUJI is set)");
+    }
+    Ok(())
+}
+
+/// セッションに接続し，終わったら理由を表示する．
+fn run_client(name: &str) -> Result<()> {
+    let end = session::attach(name)?;
+    match end {
+        session::End::Detached => println!("[detached from session {name}: the programs keep running. `shouji attach {name}` to go back]"),
+        session::End::Exited => println!("[session {name} ended]"),
+        session::End::Lost => println!("[lost the connection to session {name}]"),
+    }
+    // 標準入力を読んでいるスレッドが残っているので，ここで終える
+    std::process::exit(0);
+}
+
+/// 接続中のクライアント．
+struct Client {
+    id: u64,
+    stream: UnixStream,
+}
+
+/// サーバー: 端末なしで動き続け，接続したクライアントに画面を送る．
+fn run_server(name: &str, size: (u16, u16), opts: &Opts) -> Result<()> {
+    let (config, startup) = load(opts)?;
+    let path = session::socket_path(name)?;
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).with_context(|| format!("cannot listen on {}", path.display()))?;
 
     let (tx, rx) = mpsc::channel();
-
-    // キーボード入力
     {
         let tx = tx.clone();
-        thread::spawn(move || {
-            let mut stdin = io::stdin();
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = stdin.read(&mut buf) {
-                if n == 0 || tx.send(Event::Input(buf[..n].to_vec())).is_err() {
-                    break;
-                }
-            }
-        });
+        thread::spawn(move || accept_loop(listener, tx));
     }
 
-    // 端末のリサイズ通知
-    {
-        let tx = tx.clone();
-        let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH])?;
-        thread::spawn(move || {
-            for _ in signals.forever() {
-                if tx.send(Event::Resize).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    let guard = TerminalGuard::new()?;
-    let mut app = App::new(tx, config, &startup)?;
+    let mut app = App::new(tx, config, &startup, size)?;
     let mut renderer = Renderer::default();
-    let mut out = io::BufWriter::with_capacity(1 << 16, io::stdout());
+    let mut client: Option<Client> = None;
 
     loop {
         app.check_waits();
-        let (frame, cursor, modes) = app.compose();
-        renderer.draw(&mut out, frame, cursor, modes)?;
+        if let Some(c) = &mut client {
+            let (frame, cursor, modes) = app.compose();
+            let mut buf = Vec::with_capacity(1 << 14);
+            renderer.draw(&mut buf, frame, cursor, modes)?;
+            if session::write_frame(&mut c.stream, session::OUTPUT, &buf).is_err() {
+                client = None;
+            }
+        }
 
         // delay の待ちがあれば，その時刻までにイベントがなくても起き上がる
         let ev = match app.next_deadline() {
@@ -1051,15 +1161,16 @@ fn main() -> Result<()> {
             },
         };
         let Some(ev) = ev else { continue };
-        let mut resized = matches!(ev, Event::Resize);
-        app.handle(ev);
+        server_event(&mut app, &mut client, &mut renderer, ev);
         // 溜まっているイベントをまとめて処理してから 1 回だけ描画する
         while let Ok(ev) = rx.try_recv() {
-            resized |= matches!(ev, Event::Resize);
-            app.handle(ev);
+            server_event(&mut app, &mut client, &mut renderer, ev);
         }
-        if resized {
-            renderer.invalidate();
+        if app.detach {
+            app.detach = false;
+            if let Some(mut c) = client.take() {
+                let _ = session::write_frame(&mut c.stream, session::DETACHED, &[]);
+            }
         }
         if app.quit {
             break;
@@ -1069,6 +1180,83 @@ fn main() -> Result<()> {
     for pane in app.panes.values_mut() {
         pane.kill();
     }
-    drop(guard);
+    if let Some(mut c) = client {
+        let _ = session::write_frame(&mut c.stream, session::EXIT, &[]);
+    }
+    let _ = std::fs::remove_file(&path);
     Ok(())
+}
+
+fn server_event(app: &mut App, client: &mut Option<Client>, renderer: &mut Renderer, ev: Event) {
+    let current = client.as_ref().map(|c| c.id);
+    match ev {
+        Event::Attach(id, stream, w, h) => {
+            // 別の端末が接続していれば，そちらは切り離す
+            if let Some(mut old) = client.take() {
+                let _ = session::write_frame(&mut old.stream, session::DETACHED, &[]);
+            }
+            *client = Some(Client { id, stream });
+            *renderer = Renderer::default();
+            app.handle(Event::Resize(w, h));
+        }
+        Event::ClientInput(id, bytes) if Some(id) == current => app.handle(Event::Input(bytes)),
+        Event::ClientResize(id, w, h) if Some(id) == current => {
+            app.handle(Event::Resize(w, h));
+            renderer.invalidate();
+        }
+        Event::ClientGone(id) if Some(id) == current => *client = None,
+        Event::ClientInput(..) | Event::ClientResize(..) | Event::ClientGone(_) => {}
+        Event::Info(mut stream) => {
+            let running = app.panes.values().filter(|p| !p.is_dead()).count();
+            let state = if client.is_some() { "attached" } else { "detached" };
+            let text = format!("{} window(s), {running} running program(s), {state}", app.windows.len());
+            let _ = session::write_frame(&mut stream, session::INFO_REPLY, text.as_bytes());
+        }
+        Event::Kill => app.quit = true,
+        ev => app.handle(ev),
+    }
+}
+
+/// ソケットで待ち受け，接続ごとに読み取りスレッドを立てる．
+fn accept_loop(listener: UnixListener, tx: Sender<Event>) {
+    let mut next_id = 0u64;
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let tx = tx.clone();
+        next_id += 1;
+        let id = next_id;
+        thread::spawn(move || {
+            let Ok(Some((kind, payload))) = session::read_frame(&mut stream) else { return };
+            match kind {
+                session::HELLO => {
+                    let (w, h) = session::parse_size(&payload).unwrap_or((80, 24));
+                    let Ok(writer) = stream.try_clone() else { return };
+                    if tx.send(Event::Attach(id, writer, w, h)).is_err() {
+                        return;
+                    }
+                    while let Ok(Some((kind, payload))) = session::read_frame(&mut stream) {
+                        let ev = match kind {
+                            session::INPUT => Event::ClientInput(id, payload),
+                            session::RESIZE => match session::parse_size(&payload) {
+                                Some((w, h)) => Event::ClientResize(id, w, h),
+                                None => continue,
+                            },
+                            _ => continue,
+                        };
+                        if tx.send(ev).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = tx.send(Event::ClientGone(id));
+                }
+                session::INFO => {
+                    let _ = tx.send(Event::Info(stream));
+                }
+                session::KILL => {
+                    let _ = tx.send(Event::Kill);
+                }
+                _ => {}
+            }
+        });
+    }
 }

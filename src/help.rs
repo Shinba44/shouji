@@ -61,7 +61,7 @@ const GROUPS: &[Group] = &[
             ("C-q t", "Show / hide the layout panel"),
             ("C-q m", "Mouse on / off"),
             ("C-q ?", "This help"),
-            ("C-q d", "Quit (asks first)"),
+            ("C-q d", "Leave: detach or quit"),
             ("C-q C-q", "Send Ctrl-q to the program"),
         ],
     },

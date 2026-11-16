@@ -8,7 +8,7 @@
 //! │   ├ build  ● │ ╰───────────────────────────────────────────────────────╯
 //! │ ● running    │
 //!  What you type goes to "build". Click another pane to switch.
-//!  C-q z Zoom  C-q q Close pane  C-q [ Scroll back  C-q t Hide layout  C-q ? Help  C-q d Quit
+//!  C-q z Zoom  C-q q Close pane  C-q [ Scroll back  C-q t Hide layout  C-q ? Help  C-q d Leave
 //! ```
 //!
 //! 描画とクリック判定は同じ部品の一覧（[`Part`]）から行う．
@@ -351,7 +351,7 @@ impl App {
                 (msg.clone(), RED)
             } else if self.confirm_quit {
                 let n = self.panes.values().filter(|p| !p.is_dead()).count();
-                (format!("Quit shouji? The {n} running program(s) will be stopped."), RED)
+                (format!("Leave shouji? {n} program(s) are running. Detach keeps them running; come back with `shouji attach`."), AMBER)
             } else if self.input.in_prefix() {
                 ("Ctrl-q pressed: now press a command key (? shows the list).".into(), AMBER)
             } else if let Some(info) = &self.info {
@@ -366,7 +366,11 @@ impl App {
 
         // 2 行目: よく使う操作のボタン（札はキーボードでの操作）
         let mut hints = if self.confirm_quit {
-            vec![Hint { hot: true, ..hint("y", "Quit and stop all programs", Some(b"y")) }, hint("Esc", "Cancel", Some(b"\x1b"))]
+            vec![
+                hint("d", "Detach (keep running)", Some(b"d")),
+                Hint { hot: true, ..hint("y", "Quit and stop all programs", Some(b"y")) },
+                hint("Esc", "Cancel", Some(b"\x1b")),
+            ]
         } else if self.scrolling {
             vec![
                 hint("k/j", "Line", None),
@@ -383,7 +387,7 @@ impl App {
             v.push(hint("C-q [", "Scroll back", Some(b"\x11[")));
             v.push(hint("C-q t", if self.sidebar { "Hide layout" } else { "Show layout" }, Some(b"\x11t")));
             v.push(hint("C-q ?", "Help", Some(b"\x11?")));
-            v.push(hint("C-q d", "Quit", Some(b"\x11d")));
+            v.push(hint("C-q d", "Leave", Some(b"\x11d")));
             v
         };
         // 入りきらなければ，最後の 2 つ（Help と Quit など）は残して手前から省く
