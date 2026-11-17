@@ -3,6 +3,8 @@
 A terminal launcher: list your programs in a YAML file and start them all at once, each in its own pane.
 It also works as a simple terminal multiplexer (splits, windows, scrollback).
 
+![shouji demo](shouji_htw.gif)
+
 ## Install
 
 Linux (x86_64 / aarch64), from GitHub Releases:
