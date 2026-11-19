@@ -479,6 +479,11 @@ impl App {
     }
 
     fn handle(&mut self, ev: Event) {
+        // 最後のペインが閉じて終わるところ（ウィンドウが無い）．同じときに届いた
+        // 入力などは捨てる（win() が使えない）
+        if self.windows.is_empty() {
+            return;
+        }
         match ev {
             Event::Input(bytes) => {
                 for chunk in self.paste_input.feed(&bytes) {
@@ -1582,7 +1587,10 @@ fn run_server(name: &str, size: (u16, u16), opts: &Opts) -> Result<()> {
     }
 
     // stop を実行して待つ間，接続中の端末には「Stopping」と出しておく
-    if let Some(c) = &mut client {
+    // （最後のペインが閉じて終わるときはウィンドウが無いので描けない）
+    if let Some(c) = &mut client
+        && !app.windows.is_empty()
+    {
         app.info = Some("Stopping the programs...".into());
         app.confirm_quit = false;
         let (frame, cursor, modes) = app.compose();

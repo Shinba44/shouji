@@ -6,6 +6,8 @@
 //!
 //! GNOME Terminal など OSC 52 を無視する端末のために，クライアントはデスクトップの
 //! クリップボードのコマンド（wl-copy・xclip・xsel）があれば，それにも渡す．
+//! tmux の中では `tmux load-buffer -w -` にも渡す．tmux が接続中の端末へ OSC 52 を送るので，
+//! 素通し（DCS）が通らない設定や，ssh 越しの tmux でも手元のクリップボードに届く．
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -62,23 +64,35 @@ fn commands(custom: Option<String>, wayland: bool, x11: bool) -> Vec<(String, Ve
 /// 端末（クライアント）側で呼ぶ．ここで使う DISPLAY などはその端末のもの．
 pub fn copy_with_command(text: String) {
     let present = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
-    let cmds = commands(std::env::var("SHOUJI_COPY_COMMAND").ok(), present("WAYLAND_DISPLAY"), present("DISPLAY"));
-    if cmds.is_empty() {
+    let custom = std::env::var("SHOUJI_COPY_COMMAND").ok().filter(|c| !c.trim().is_empty());
+    // tmux のバッファへ（-w: tmux から端末のクリップボードへも送る）．指定のコマンドがあればそれだけ使う
+    let tmux = custom.is_none() && present("TMUX");
+    let cmds = commands(custom, present("WAYLAND_DISPLAY"), present("DISPLAY"));
+    if cmds.is_empty() && !tmux {
         return;
     }
     std::thread::spawn(move || {
-        for (cmd, args) in cmds {
-            let child = Command::new(&cmd).args(&args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-            let Ok(mut child) = child else { continue }; // 入っていなければ次を試す
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            // xclip などは中身を渡すと裏に回って終わる
-            if child.wait().is_ok_and(|s| s.success()) {
+        // tmux の手前の端末が OSC 52 を無視するときのために，デスクトップのコマンドにも渡す
+        if tmux {
+            run(&("tmux".into(), vec!["load-buffer".into(), "-w".into(), "-".into()]), &text);
+        }
+        for cmd in &cmds {
+            if run(cmd, &text) {
                 return;
             }
         }
     });
+}
+
+/// `cmd` の標準入力に `text` を渡して実行する．成功したか（入っていなければ false）．
+fn run((cmd, args): &(String, Vec<String>), text: &str) -> bool {
+    let child = Command::new(cmd).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+    let Ok(mut child) = child else { return false };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    // xclip などは中身を渡すと裏に回って終わる
+    child.wait().is_ok_and(|s| s.success())
 }
 
 #[cfg(test)]
